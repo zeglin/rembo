@@ -2,10 +2,12 @@ import { randomBytes } from 'node:crypto';
 import { promises as fs } from 'node:fs';
 import path from 'node:path';
 import { entryFromMarkdown, entryRelPath, entryToMarkdown, type Entry, type EntryMeta } from './entry.ts';
+import { RemboError } from './errors.ts';
 import { atomicWrite, exists, readJson } from './fsutil.ts';
+import { OBJECT_ID_RE } from './protocol.ts';
 import { renderViews } from './views.ts';
 
-export type OutboxOp = { op: 'put'; id: string; data: string } | { op: 'delete'; id: string };
+export type OutboxOp = { op: 'put'; id: string; data: string } | { op: 'delete'; id: string; proof: string };
 
 export interface PendingOp {
   file: string;
@@ -76,6 +78,7 @@ export class LocalVault {
   }
 
   async findEntryFile(id: string): Promise<string | null> {
+    if (!OBJECT_ID_RE.test(id)) throw new RemboError('invalid_id', `"${id}" is not a valid entry id.`);
     for (const year of await this.listDir(this.entriesDir)) {
       for (const month of await this.listDir(path.join(this.entriesDir, year))) {
         const file = path.join(this.entriesDir, year, month, `${id}.md`);

@@ -54,8 +54,12 @@ Status: draft for review (Etap 0), 2026-10-20.
 - **Claude Code's native auto memory is bridged**: whatever Claude writes
   there (in any session, also rembo-off ones) is synced to all devices
   (ADR-0006). Users who do not want that disable native auto memory.
-- **Availability attacks by the hub**: it can withhold records, delete them,
-  or go offline. It cannot alter them. Local copies keep working.
+- **Availability attacks by the hub**: it can withhold records, drop them
+  from its own storage, or go offline. It cannot alter records, cannot make
+  devices delete their local copies (tombstones carry a proof sealed with the
+  vault key), and cannot switch a vault to unencrypted (the flag lives inside
+  the recovery-key-protected keyring). Every id it sends is validated before
+  any filesystem use. Local copies keep working.
 - **Loss of the recovery key and all devices** = loss of the vault. Nobody,
   including rembo cloud, can recover it.
 - rembo is **not a secrets manager**; the guard is best-effort pattern

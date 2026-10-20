@@ -32,8 +32,10 @@ secrets. rembo's recovery key is 256 random bits, so HKDF is sufficient.
 - **Recovery key**: 32 random bytes, generated on the first device, shown once
   as `RK-` + base32 groups + checksum (e.g. for a password manager), never
   stored by rembo, never sent anywhere.
-- **Keyring object** (on the hub, encrypted): `VK` wrapped with
-  `HKDF(recovery key)` via AES-256-GCM. A new device downloads the keyring and
+- **Keyring object** (on the hub, encrypted): `VK` and the vault's
+  `encryption` flag, wrapped with `HKDF(recovery key)` via AES-256-GCM.
+  Joining devices take the flag from the keyring, never from the hub's
+  answer, so a hub cannot downgrade a vault to plaintext. A new device downloads the keyring and
   unwraps it with the recovery key. Devices store `VK`, not the recovery key.
 
 ### Envelope

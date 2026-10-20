@@ -31,6 +31,8 @@ import { HubClient, HubError, type HubEndpoint } from './http.ts';
 import { decodeAccountKey } from './keys.ts';
 import {
   LIMITS,
+  OBJECT_ID_RE,
+  VAULT_ID_RE,
   type ChangeRecord,
   type ChangesResponse,
   type DeviceInfo,
@@ -176,15 +178,18 @@ export class RemboClient {
             'Run setup again with --recovery-key RK-… (shown when the first machine was set up).',
           );
         }
+        if (!VAULT_ID_RE.test(existing.id)) throw new RemboError('bad_hub_response', 'The hub returned an invalid vault id.');
         const kr = await hub.request<KeyringResponse>('GET', `/v1/vaults/${existing.id}/keyring`);
-        vaultKey = openKeyring(Buffer.from(kr.keyring, 'base64url'), recovery, existing.id);
-        vaultInfo = existing;
+        const opened = openKeyring(Buffer.from(kr.keyring, 'base64url'), recovery, existing.id);
+        vaultKey = opened.vaultKey;
+        // The encryption flag is taken from the authenticated keyring, not from the hub's answer.
+        vaultInfo = { id: existing.id, encryption: opened.encryption, keyringVersion: existing.keyringVersion };
       } else {
         const id = randomId();
         const rk = recovery ?? newRecoveryKey();
         vaultKey = newVaultKey();
         const encryption = opts.encryption ?? true;
-        await hub.request('POST', '/v1/vaults', { id, encryption, keyring: sealKeyring(vaultKey, rk, id).toString('base64url') });
+        await hub.request('POST', '/v1/vaults', { id, encryption, keyring: sealKeyring(vaultKey, rk, id, encryption).toString('base64url') });
         vaultInfo = { id, encryption, keyringVersion: 1 };
         recoveryText = recovery ? undefined : formatRecoveryKey(rk);
       }
@@ -251,8 +256,32 @@ export class RemboClient {
   async forget(id: string): Promise<boolean> {
     const existed = await this.vault.deleteEntry(id);
     if (!existed) throw new RemboError('not_found', `No entry with id ${id} on this machine.`, 'Run rembo sync, then try again.');
-    await this.vault.enqueue({ op: 'delete', id });
+    await this.vault.enqueue({ op: 'delete', id, proof: this.tombstoneProof(id).toString('base64url') });
     return true;
+  }
+
+  /** A delete marker sealed with the vault key: other devices honour only tombstones a device created. */
+  private tombstoneProof(id: string): Buffer {
+    return sealObject(Buffer.from(JSON.stringify({ v: 1, deleted: id })), {
+      vaultId: this.vault.vaultId,
+      objectId: `tombstone:${id}`,
+      keys: this.keys,
+      encrypt: this.config.vault.encryption,
+    });
+  }
+
+  private validTombstone(r: ChangeRecord): boolean {
+    try {
+      const plain = openObject(Buffer.from(r.data ?? '', 'base64url'), {
+        vaultId: this.vault.vaultId,
+        objectId: `tombstone:${r.id}`,
+        keys: this.keys,
+        allowPlain: !this.config.vault.encryption,
+      });
+      return (JSON.parse(plain.toString('utf8')) as { deleted?: string }).deleted === r.id;
+    } catch {
+      return false;
+    }
   }
 
   async loadEntries(): Promise<Entry[]> {
@@ -297,7 +326,7 @@ export class RemboClient {
       pushed += chunk.length;
     }
     for (const del of ops.filter((o) => o.op.op === 'delete')) {
-      await this.hub.request('DELETE', `/v1/vaults/${this.vault.vaultId}/objects/${del.op.id}`);
+      await this.hub.request('DELETE', `/v1/vaults/${this.vault.vaultId}/objects/${del.op.id}`, { proof: (del.op as { proof: string }).proof });
       await this.vault.removeOps([del]);
       pushed++;
     }
@@ -319,8 +348,11 @@ export class RemboClient {
           `/v1/vaults/${this.vault.vaultId}/changes?since=${state.cursor}&limit=${LIMITS.changesPage}`,
         );
         for (const r of page.records) {
-          if (r.kind === 'tombstone') {
-            if (await this.vault.deleteEntry(r.id)) {
+          if (!OBJECT_ID_RE.test(r.id)) {
+            result.rejected++; // never let a hub-supplied id reach the filesystem
+          } else if (r.kind === 'tombstone') {
+            if (!this.validTombstone(r)) result.rejected++; // forged by the hub: keep the local copy
+            else if (await this.vault.deleteEntry(r.id)) {
               result.removed++;
               changed = true;
             }

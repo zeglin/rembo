@@ -251,13 +251,13 @@ export class HubDb {
   }
 
   /** Appends a tombstone and erases the stored ciphertext of that object. */
-  tombstone(vaultId: string, objectId: string, deviceId: string): number {
+  tombstone(vaultId: string, objectId: string, deviceId: string, proof: Buffer): number {
     return this.tx(() => {
       const existing = this.s.tombstone!.get(vaultId, objectId) as { seq: number } | undefined;
       if (existing) return Number(existing.seq);
       this.s.erasePut!.run(vaultId, objectId);
       const head = Number((this.s.head!.get(vaultId) as { head_seq: number }).head_seq) + 1;
-      this.s.insert!.run(vaultId, head, objectId, 'tombstone', null, 0, deviceId, now());
+      this.s.insert!.run(vaultId, head, objectId, 'tombstone', proof, proof.length, deviceId, now());
       this.s.setHead!.run(head, vaultId);
       return head;
     });

@@ -117,7 +117,9 @@ export function createHandler(opts: HubOptions): http.RequestListener {
   const lastTouch = new Map<string, number>();
 
   const clientIp = (req: http.IncomingMessage) => {
-    const fwd = opts.trustProxy ? String(req.headers['x-forwarded-for'] ?? '').split(',')[0]?.trim() : '';
+    // Behind one trusted proxy the real client is the right-most entry (the one the proxy appended);
+    // left-most entries are whatever the client sent.
+    const fwd = opts.trustProxy ? String(req.headers['x-forwarded-for'] ?? '').split(',').at(-1)?.trim() : '';
     return fwd || req.socket.remoteAddress || 'unknown';
   };
 
@@ -248,7 +250,8 @@ export function createHandler(opts: HubOptions): http.RequestListener {
         requireFull(device);
         const vault = requireVault(device, params[0]!);
         if (!OBJECT_ID_RE.test(params[1]!)) throw new ApiError(400, 'bad_request', 'Invalid object id.');
-        return ok({ seq: db.tombstone(vault.id, params[1]!, device.id) });
+        const body = (await readBody(req, 64 * 1024)) as { proof?: unknown };
+        return ok({ seq: db.tombstone(vault.id, params[1]!, device.id, decodeData(body.proof)) });
       }
       case 'changes': {
         const vault = requireVault(device, params[0]!);

@@ -30,8 +30,11 @@ insert transaction (`BEGIN IMMEDIATE`), strictly increasing per vault.
   Each item: `created {seq}` or `exists` (same id already stored: idempotent
   success, so retries and duplicate imports are harmless). Re-writing an id
   with different content is impossible: the existing record wins.
-- `DELETE /v1/vaults/:vault/objects/:id` — appends a tombstone and **erases
-  the stored ciphertext** of that id.
+- `DELETE /v1/vaults/:vault/objects/:id` with `{proof}` — appends a tombstone
+  and **erases the stored ciphertext** of that id. The proof is a delete
+  marker sealed with the vault key (AAD object id `tombstone:<id>`); devices
+  apply a tombstone only if the proof verifies, so the hub cannot forge
+  deletions of local copies.
 - `GET /v1/vaults/:vault/changes?since=<seq>&limit=<n>` — records with
   `seq > since`, plus `head_seq` and `more`.
 

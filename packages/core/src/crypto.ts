@@ -139,6 +139,7 @@ export function openObject(envelope: Buffer, ctx: ObjectContext & { allowPlain: 
 
 interface KeyringJson {
   v: 1;
+  encryption: boolean; // authenticated here so a hub cannot downgrade a vault
   current: string;
   keys: { kid: string; key: string }[];
 }
@@ -151,16 +152,18 @@ function keyringAad(vaultId: string): Buffer {
   return Buffer.concat([field('rembo/keyring/v1'), field(vaultId)]);
 }
 
-export function sealKeyring(current: VaultKey, recovery: Buffer, vaultId: string): Buffer {
+export function sealKeyring(current: VaultKey, recovery: Buffer, vaultId: string, encryption = true): Buffer {
   const json: KeyringJson = {
     v: 1,
+    encryption,
     current: current.kid.toString('hex'),
     keys: [{ kid: current.kid.toString('hex'), key: current.key.toString('hex') }],
   };
   return aeadSeal(keyringKek(recovery, vaultId), keyringAad(vaultId), Buffer.from(JSON.stringify(json)), Buffer.alloc(KID_LEN));
 }
 
-export function openKeyring(blob: Buffer, recovery: Buffer, vaultId: string): VaultKey {
+/** Opens the keyring; the vault's encryption setting comes from here, never from the hub. */
+export function openKeyring(blob: Buffer, recovery: Buffer, vaultId: string): { vaultKey: VaultKey; encryption: boolean } {
   if (checkEnvelope(blob) !== MODE_AES_GCM) throw new RemboError('corrupt', 'Invalid keyring.');
   let json: KeyringJson;
   try {
@@ -174,7 +177,10 @@ export function openKeyring(blob: Buffer, recovery: Buffer, vaultId: string): Va
   }
   const current = json.keys.find((k) => k.kid === json.current);
   if (!current) throw new RemboError('corrupt', 'Keyring has no current key.');
-  return { kid: Buffer.from(current.kid, 'hex'), key: Buffer.from(current.key, 'hex') };
+  return {
+    vaultKey: { kid: Buffer.from(current.kid, 'hex'), key: Buffer.from(current.key, 'hex') },
+    encryption: json.encryption !== false,
+  };
 }
 
 // ---- recovery key: 32 random bytes + 3-byte checksum, base32, "RK-" + groups of 4

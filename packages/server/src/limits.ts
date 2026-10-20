@@ -41,8 +41,20 @@ export class FailureLimiter {
       e.blockedUntil = now + Math.min(3_600_000, 60_000 * 2 ** (e.strikes - 1));
       e.count = 0;
     }
-    this.entries.set(ip, e);
-    if (this.entries.size > 100_000) this.entries.clear(); // memory guard against address spraying
+    this.entries.delete(ip);
+    this.entries.set(ip, e); // re-insert: Map order = least recently failed first
+    if (this.entries.size > 100_000) this.evict(now);
+  }
+
+  /** Memory guard against address spraying: drop expired entries, then the oldest unblocked ones; active lockouts stay. */
+  private evict(now: number): void {
+    for (const [ip, e] of this.entries) {
+      if (e.blockedUntil <= now && now - e.windowStart > 60_000) this.entries.delete(ip);
+    }
+    for (const [ip, e] of this.entries) {
+      if (this.entries.size <= 90_000) break;
+      if (e.blockedUntil <= now) this.entries.delete(ip);
+    }
   }
 }
 

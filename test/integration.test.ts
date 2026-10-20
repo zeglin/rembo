@@ -213,6 +213,51 @@ describe('account isolation', () => {
   });
 });
 
+describe('malicious hub', () => {
+  const hubBytes = async () => {
+    hub.db.checkpoint();
+    const files = (await fs.readdir(home('hub'))).filter((f) => f.startsWith('hub.db'));
+    return Buffer.concat(await Promise.all(files.map((f) => fs.readFile(path.join(home('hub'), f)))));
+  };
+
+  test('cannot downgrade encryption for a joining device', async () => {
+    const key = newAccountKey();
+    const first = await RemboClient.setup({ home: home('mal-a'), accountKey: key, deviceName: 'mal-a' });
+    hub.db.db.prepare('UPDATE vaults SET encryption = 0 WHERE id = ?').run(first.client.config.vault.id); // the hub lies
+    const second = await RemboClient.setup({ home: home('mal-b'), accountKey: key, recoveryKey: first.recoveryKey!, deviceName: 'mal-b' });
+    expect(second.client.config.vault.encryption).toBe(true);
+    await second.client.remember({ title: 'DOWNGRADE-CANARY-9931' });
+    await second.client.sync();
+    expect((await hubBytes()).includes(Buffer.from('DOWNGRADE-CANARY-9931'))).toBe(false);
+    first.client.close();
+    second.client.close();
+  });
+
+  test('forged tombstones and path-traversal ids never touch local files', async () => {
+    const { client } = await RemboClient.setup({ home: home('mal-c'), accountKey: newAccountKey(), deviceName: 'mal-c' });
+    const keep = await client.remember({ title: 'must survive' });
+    await client.sync();
+    const sentinel = path.join(home('mal-c'), 'sentinel.md');
+    await fs.writeFile(sentinel, 'do not delete');
+    const vid = client.config.vault.id;
+    hub.db.tx(() => {
+      let head = Number((hub.db.db.prepare('SELECT head_seq FROM vaults WHERE id = ?').get(vid) as { head_seq: number }).head_seq);
+      const insert = hub.db.db.prepare(
+        "INSERT INTO records (vault_id, seq, object_id, kind, data, size, device_id, created_at) VALUES (?, ?, ?, 'tombstone', NULL, 0, NULL, ?)",
+      );
+      insert.run(vid, ++head, '../../../../sentinel', new Date().toISOString());
+      insert.run(vid, ++head, keep.meta.id, new Date().toISOString()); // no device-made proof
+      hub.db.db.prepare('UPDATE vaults SET head_seq = ? WHERE id = ?').run(head, vid);
+    });
+    const result = await client.sync();
+    expect(result.rejected).toBe(2);
+    expect(await client.read(keep.meta.id)).not.toBeNull();
+    expect(await fs.readFile(sentinel, 'utf8')).toBe('do not delete');
+    await expect(client.read('../../sentinel')).rejects.toMatchObject({ code: 'invalid_id' });
+    client.close();
+  });
+});
+
 describe('CLI end to end', () => {
   const cli = path.resolve('packages/rembo/src/cli.ts');
   const node = (args: string[], env: Record<string, string> = {}) =>

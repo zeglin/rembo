@@ -62,7 +62,9 @@ describe('keyring and recovery key', () => {
     const vk = newVaultKey();
     const rk = newRecoveryKey();
     const blob = sealKeyring(vk, rk, 'v1');
-    expect(openKeyring(blob, rk, 'v1').key.equals(vk.key)).toBe(true);
+    expect(openKeyring(blob, rk, 'v1').vaultKey.key.equals(vk.key)).toBe(true);
+    expect(openKeyring(blob, rk, 'v1').encryption).toBe(true);
+    expect(openKeyring(sealKeyring(vk, rk, 'v1', false), rk, 'v1').encryption).toBe(false);
     expect(() => openKeyring(blob, newRecoveryKey(), 'v1')).toThrow(/does not unlock/);
     expect(() => openKeyring(blob, rk, 'v2')).toThrow(/does not unlock/);
   });
