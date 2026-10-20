@@ -1,0 +1,15 @@
+# Private: infrastructure details and credentials (never commit)
+private/
+vps.txt
+mail.txt
+npm-recovery.txt
+rembo-prompt.txt
+*.secret
+.env
+.env.*
+
+# Build and dependencies
+node_modules/
+dist/
+coverage/
+*.tgz
