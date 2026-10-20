@@ -13,3 +13,6 @@ node_modules/
 dist/
 coverage/
 *.tgz
+
+# Local portable toolchain (development only)
+.tools/

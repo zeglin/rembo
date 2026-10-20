@@ -6,7 +6,11 @@
 ## Context
 
 rembo cloud is a paid hosted hub. Same client, same protocol; the server runs
-`mode: cloud`. This round implements `selfhost` only, but nothing may block
+`mode: cloud`. The open-source project (MIT) is authored by Wojciech Żeglin;
+commercial access (rembo cloud) will be sold and operated by
+**DataMiners sp. z o.o.**, which is therefore the contracting party and the
+data controller for account data (e-mail, billing, IPs, usage metadata) —
+never for memory content, which it cannot decrypt. This round implements `selfhost` only, but nothing may block
 cloud.
 
 ## Decision

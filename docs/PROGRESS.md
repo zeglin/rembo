@@ -20,9 +20,11 @@ client CLI without the plugin (setup, remember, search, sync, status,
 doctor). DoD per brief §9 (3 clients × 1000 parallel ops; no plaintext in the
 hub DB; account isolation).
 
+Decided: LICENSE holder and author is Wojciech Żeglin; rembo cloud will be
+sold and operated by DataMiners sp. z o.o. (ADR-0011).
+
 Open questions:
 1. Upgrade Node on this machine (20.15.1, EOL) to 24 LTS before Etap 2?
-2. LICENSE holder line: "The rembo authors" — or a specific name?
 
 Experiments planned for Etap 2:
 - detached child from a hook: does Claude Code wait for it (Windows)?
