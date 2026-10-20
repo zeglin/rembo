@@ -17,8 +17,8 @@ install of Claude Code itself requires Node >= 22.
   plain Node scripts. `rembo setup` checks the version and prints the exact
   upgrade step for the OS (winget / nvm / NodeSource). The absolute Node path
   is baked into the plugin's hook and MCP commands at setup (ADR-0001), so a
-  different PATH in GUI-launched Claude Code does not matter. Node >= 24.7
-  gives native Argon2 (ADR-0005), otherwise the WASM fallback is used.
+  different PATH in GUI-launched Claude Code does not matter. Crypto uses
+  only `node:crypto` (ADR-0005), available on every supported version.
 - **Hub (`rembo-server`)**: `>= 24.16 < 25 || >= 26.1`, SQLite through the
   built-in `node:sqlite` (Release Candidate stability in 24.15+, synchronous
   API, WAL via pragma, bundled SQLite >= 3.53 with the 2026 WAL-reset fix;

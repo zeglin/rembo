@@ -50,7 +50,7 @@ Admin CLI (local only, over SSH): `rembo-server key create|list|revoke`,
 4 weekly), in `/var/lib/rembo/backups`; documented off-site copy (they hold
 only ciphertext and metadata).
 
-**Logs:** journald, structured, no bodies, no keys, no signatures; request id,
+**Logs:** journald, structured, no bodies, no keys, no tokens; request id,
 device id, status, latency.
 
 ## Consequences

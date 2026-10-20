@@ -9,6 +9,6 @@ machine you use.
 
 - One command per machine: `npx rembo@latest setup <key>`
 - Self-host the hub on your own server, or use rembo cloud (coming later)
-- The hub stores only ciphertext; your recovery phrase never leaves your devices
+- The hub stores only ciphertext; your recovery key never leaves your hands
 
 License: MIT

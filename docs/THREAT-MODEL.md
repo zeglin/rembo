@@ -5,7 +5,7 @@ Status: draft for review (Etap 0), 2026-10-20.
 ## Assets
 
 1. Memory content (entries, pages, imported docs): confidentiality, integrity.
-2. Credentials: account key, device keys, vault key, recovery phrase.
+2. Credentials: account key, device tokens, vault key, recovery key.
 3. Availability of memory (local copy + hub).
 4. Tenant isolation on a multi-tenant (cloud) hub.
 5. Metadata: account e-mail (cloud), device names, IPs, object counts/sizes,
@@ -27,12 +27,12 @@ Status: draft for review (Etap 0), 2026-10-20.
 
 | threat | mitigation |
 | --- | --- |
-| Hub DB / backup theft, curious operator (incl. rembo cloud staff) | E2E: XChaCha20-Poly1305 with a vault key the hub never has; titles, paths, tags inside ciphertext; random-looking object ids; optional size padding (ADR-0005) |
-| Hub tampering with objects | AEAD with AAD = vault id + object id + rev: swaps, edits and rev-rollbacks of a known object are detected |
-| Leaked hub DB used to impersonate devices | hub stores only Ed25519 public keys (account and device keys) (ADR-0002) |
+| Hub DB / backup theft, curious operator (incl. rembo cloud staff) | E2E: AES-256-GCM with a vault key the hub never has; titles, paths, tags inside ciphertext; random-looking object ids; size padding (ADR-0005) |
+| Hub tampering with objects | AEAD with AAD = vault id + object id; objects are immutable, so any change or swap is detected (ADR-0004/0005) |
+| Leaked hub DB used to impersonate devices | hub stores only SHA-256 hashes of high-entropy account keys and device tokens (ADR-0002) |
 | Network eavesdropping / MITM | TLS only, no plain HTTP; IP mode pins the hub's SPKI from the account key; domain mode uses WebPKI (ADR-0003) |
-| Replay of captured requests | signature covers method, path, body hash, timestamp, nonce; ±300 s window + nonce cache |
-| Unauthorized device | registration requires a signature by the account key; device limit; per-device revocation; `vault rotate` after revocation |
+| Stolen device token (e.g. a proxy logging headers) | allows downloading ciphertext and deleting records only; per-device revocation; daily hub backups; full local copy on every device |
+| Unauthorized device | registration requires the account key (stored only as a hash on the hub); device limit; per-device revocation; `vault rotate` after revocation |
 | Brute force / scanning | no unauthenticated endpoints except `/health` (no data); constant-time checks; no account enumeration (uniform 401); rate limits and temporary lockouts; request size limits |
 | Cross-tenant access (cloud) | every query is scoped by `account_id` at the repository layer; tests with two accounts in Etap 1 |
 | Secrets stored in memory by mistake | client-side secret guard before every write and every outbound text; report without values (ADR-0006) |
@@ -51,12 +51,12 @@ Status: draft for review (Etap 0), 2026-10-20.
   any plugin.
 - **Metadata is visible to the hub**: which account and device, when, from
   which IP, how many objects, their sizes (unless padding), sync frequency.
-- **An enabled classifier** sends redacted snippets of conversations to the
-  chosen provider (opt-in, explained when enabling; ADR-0009).
-- **Availability attacks by the hub**: it can withhold changes, go offline,
-  or present an old full state to a newly joined device. Local copies keep
-  working; detected rollback of a known object is refused.
-- **Loss of the recovery phrase and all devices** = loss of the vault. Nobody,
+- **Claude Code's native auto memory is bridged**: whatever Claude writes
+  there (in any session, also rembo-off ones) is synced to all devices
+  (ADR-0006). Users who do not want that disable native auto memory.
+- **Availability attacks by the hub**: it can withhold records, delete them,
+  or go offline. It cannot alter them. Local copies keep working.
+- **Loss of the recovery key and all devices** = loss of the vault. Nobody,
   including rembo cloud, can recover it.
 - rembo is **not a secrets manager**; the guard is best-effort pattern
   matching, not a guarantee.
@@ -67,7 +67,7 @@ Non-root service user; listens on localhost behind the proxy, or binds 443 via
 `CAP_NET_BIND_SERVICE` in IP mode; systemd sandboxing (`ProtectSystem=strict`,
 `NoNewPrivileges`, `PrivateTmp`, read-write only on the data dir); no admin
 API on the network (admin = CLI over SSH); logs without content, keys, or
-signatures; daily backups with rotation (backups are ciphertext + metadata);
+tokens; daily backups with rotation (backups are ciphertext + metadata);
 firewall guidance: 22, 443 (+80 for ACME in domain mode). Optional hardened
 mode: hub reachable only over WireGuard/Tailscale. A non-standard port is a
 convenience, not security.

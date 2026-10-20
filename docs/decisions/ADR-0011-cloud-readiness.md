@@ -21,16 +21,16 @@ modules behind interfaces that `selfhost` implements trivially:
 | `PlanPolicy` (limits: devices, vault bytes, objects, req/min) | unlimited | per plan, from billing |
 | `KeyIssuer` | `rembo-server key create` | issued after purchase (webhook) |
 | `BillingAdapter` | none | provider TBD (Stripe or a merchant of record) |
-| `RateLimiter` / `NonceCache` | in-memory | Redis/Postgres-backed (multi-instance) |
+| `RateLimiter` | in-memory | Redis/Postgres-backed (multi-instance) |
 | `BackupJob` | nightly SQLite `VACUUM INTO` + rotation | managed PG backups + PITR |
 | `Mailer` | none | transactional e-mail for account events |
 
 **Data model is multi-tenant from day one:** `accounts(id, plan, limits,
-created)`, `account_keys(id, account_id, pubkey, revoked_at, label)`,
-`devices(id, account_id, pubkey, name, role, last_seen, revoked_at)`,
-`vaults(id, account_id, head_seq, encryption)`, `objects(vault_id, object_id,
-rev, seq, deleted, ciphertext, size, author_device_id, updated_at)`. Selfhost
-creates one account at `init`.
+created)`, `account_keys(id, account_id, secret_hash, revoked_at, label)`,
+`devices(id, account_id, token_hash, name, role, last_seen, revoked_at)`,
+`vaults(id, account_id, head_seq)`, `records(vault_id, seq, object_id, kind,
+ciphertext, size, author_device_id, created_at)` (append-only, ADR-0004).
+Selfhost creates one account at `init`.
 
 **Encryption is forced on in cloud** (`vault-config` with `encryption: off` is
 rejected by a cloud hub).

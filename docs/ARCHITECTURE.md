@@ -1,129 +1,111 @@
 # rembo architecture
 
-Status: draft for review (Etap 0), 2026-10-20. Decisions are in
-`docs/decisions/`; verified platform facts in `docs/research/platform.md`.
+Status: draft for review (Etap 0, revised after a first-principles review),
+2026-10-20. Decisions: `docs/decisions/`; platform facts:
+`docs/research/platform.md`.
 
 ## Goal
 
-Every Claude Code session on every machine of a user remembers what earlier
-sessions established, without the user's involvement, while the hub (self-
-hosted or rembo cloud) cannot read the memory.
+Every Claude Code session on every machine of a user knows what earlier
+sessions established, without the user's involvement, while the hub
+(self-hosted or rembo cloud) cannot read the memory.
+
+## Design in five lines
+
+1. **Store**: immutable encrypted entries in an append-only log per vault on
+   the hub; full plaintext copy on every device (ADR-0004, 0005, 0006).
+2. **Deliver**: a SessionStart hook injects a bounded snapshot from the local
+   copy; MCP tools search and read the rest (ADR-0006, 0012).
+3. **Capture**: Claude Code's native auto memory is bridged automatically;
+   the `remember` tool covers cross-project facts (ADR-0006).
+4. **Protect**: AES-256-GCM via `node:crypto`, vault key known only to
+   devices, recovery key never leaves the user (ADR-0005); device tokens
+   hashed on the hub (ADR-0002).
+5. **Install**: `npx rembo@latest setup <key>`; hub via
+   `npx rembo-server@latest init` (ADR-0001, 0010).
 
 ## Components
 
 ```
 packages/
-  core/     memory model, object envelope + crypto, sync engine, outbox,
-            secret guard, search backend, API types, protocol version
-  rembo/    published npm package `rembo`: CLI + Claude Code plugin
-            (hooks, MCP stdio server, skill, mod, status line wrapper),
-            bundled with esbuild into single files, zero runtime deps
-  server/   published npm package `rembo-server`: HTTP API, repository layer
-            (SQLite now, Postgres later), modes selfhost|cloud, admin CLI,
-            installer (`init`), Dockerfile + compose
-docs/       this file, THREAT-MODEL.md, decisions/, research/, PROGRESS.md
+  core/     entries + views, envelope crypto, sync (outbox, log pull),
+            native-memory bridge, secret guard, search, API types
+  rembo/    npm package `rembo`: CLI + Claude Code plugin (2 hooks, MCP
+            server, mod), bundled with esbuild, no native modules
+  server/   npm package `rembo-server`: HTTP API, append-only log on
+            node:sqlite, selfhost|cloud modes, admin CLI, installer, Dockerfile
 ```
 
-TypeScript strict, ESM, Node >= 22 (ADR-0008), npm workspaces, vitest.
-
-## Deployment shapes
+TypeScript strict, ESM, npm workspaces, vitest. Client Node >= 22.12, hub
+Node >= 24.16 (ADR-0008).
 
 ```
- machine A (Windows)          machine B (Linux VPS)            hub
- ┌────────────────────┐       ┌────────────────────┐      ┌──────────────────┐
- │ Claude Code        │       │ Claude Code        │      │ rembo-server     │
- │  ├ hooks (node)    │       │  ├ hooks           │ TLS  │  HTTP API /v1    │
- │  ├ MCP rembo       │◄─────►│  ├ MCP rembo       │◄────►│  SQLite (WAL)    │
- │  └ mod (UX)        │ sync  │  └ mod             │      │  ciphertext only │
- │ ~/.rembo (plain)   │       │ ~/.rembo           │      │  backups         │
- └────────────────────┘       └────────────────────┘      └──────────────────┘
+ machine A                    machine B                      hub
+ ┌───────────────────┐       ┌───────────────────┐       ┌──────────────────┐
+ │ Claude Code       │       │ Claude Code       │ HTTPS │ rembo-server     │
+ │  hooks · MCP · mod│       │  hooks · MCP · mod│◄─────►│ append-only log  │
+ │ ~/.rembo (plain)  │       │ ~/.rembo (plain)  │       │ ciphertext only  │
+ └───────────────────┘       └───────────────────┘       └──────────────────┘
 ```
-
-Self-hosted: the user's VPS, `npx rembo-server init` (ADR-0010).
-Cloud (next round): our hub, same protocol, `mode: cloud` (ADR-0011).
-The client has no cloud/self-host logic: the account key says where the hub
-is (ADR-0002).
 
 ## Client layout (`~/.rembo/`)
 
 ```
-config.json            hub URL, SPKI pin, account/device ids, defaults (mode, budget, classifier)
-device.json            Ed25519 device key (0600)
-app/<version>/         installed runtime: dist/*.js + plugin/ (ADR-0001)
-marketplace/           local Claude Code marketplace pointing at app/<version>
-vaults/<vault_id>/     key (0600), md/ (plaintext tree), base/, state.json,
-                       outbox/, index/, sessions/, lock
-status.json            last sync result for the status line / doctor
-logs/                  rotating, no content
-backup/                settings backups made by setup (restored by uninstall)
+config.json         hub URL, cert pin, device token (0600), defaults
+app/<version>/      installed runtime: dist/*.js + plugin/ (ADR-0001)
+marketplace/        local Claude Code marketplace -> app/<version>
+vaults/<id>/        key (0600), md/ (entries + generated views),
+                    state.json (cursor), outbox/, lock/
+bridge.json         native-memory files already imported (path -> hash, entry id)
+status.json         last sync result (status line, doctor)
+logs/  backup/
 ```
 
-## Plugin composition
+## Plugin (ADR-0012 layers)
 
-| piece | API | job |
+| piece | API stability | job |
 | --- | --- | --- |
-| SessionStart hook | classic, exec form `node hook.js session-start` | build snapshot from local copy (<300 ms), print as context (≤ 8000 chars), spawn detached sync |
-| PreToolUse hook (`mcp__plugin_rembo_.*`) | classic | deny rembo tools in sessions that are off |
-| UserPromptSubmit / Stop hooks | classic, `async: true` | append to classifier inbox when the classifier is on (ADR-0009) |
-| SessionEnd hook | classic (1.5 s budget) | spawn detached sync, return |
-| MCP server `rembo` | stdio, long-lived per session | tools `search`, `read`, `list`, `remember`, `forget`; push after writes, pull every 60 s and before reads when stale |
-| skill `rembo` | skill | rules: search before building from scratch, store important findings, cite ids, admit when nothing is found; fallback `/rembo:rembo on|off` |
-| mod | early-access hooks module | bare `/rembo …` without model turns, status line entry, toasts; calls the CLI, no crypto/network itself (ADR-0007) |
-| status line wrapper | optional | for setups without the mod |
+| MCP server `rembo` | open standard | `search`, `read`, `list`, `remember`, `forget`; push after writes, pull every 60 s and before stale searches; `instructions` with usage rules |
+| SessionStart hook | documented | snapshot (≤ 8000 chars) from local copy, spawn detached sync |
+| SessionEnd hook | documented | spawn detached sync (1.5 s budget) |
+| mod | early access | `/rembo …` without model turns, "Rembo Mode On/Off" line, toasts, off enforcement; version-guarded |
 
-## Main flows
+## Flows
 
-**Setup** (`rembo setup <key>`): check Node/Claude Code/hub reachability and
-protocol -> register device (signed by the account key) -> first device:
-create vault key + recovery phrase, upload wrapped keyring; next device:
-ask for phrase, unwrap keyring -> install app + marketplace + plugin (user
-scope) -> discovery and import (ADR-0006 secret guard) -> write/sync/read
-self-test -> summary.
-
-**Session start**: hook reads `vaults/*/md` and the session mode, resolves the
-project from `cwd` (git remote / alias / folder), emits the wrapped snapshot,
-spawns `rembo sync` detached. No network on the critical path.
-
-**Recall**: Claude calls `search` -> MCP does a quick pull if stale (≤ 1.5 s,
-skipped when offline) -> MiniSearch over the local index -> hits with id,
-path, device, date -> `read` returns the full entry.
-
-**Store**: `remember` -> secret guard -> new L2 entry (+ L1 page update if
-given) -> local write + index -> outbox -> push.
-
-**Sync**: ADR-0004 (ordered change feed, conditional puts, deterministic ids,
-3-way merge for L1).
-
-**Discovery/import** (Etap 4): scan `~/.claude/projects/*` (real path from the
-`cwd` field of the first transcript lines, since folder names are lossily
-encoded: `D:\rembo` -> `D--rembo`), `memory/*.md`, `~/.claude/CLAUDE.md`,
-`~/.claude/rules/`, and folders containing `CLAUDE.md`, `CLAUDE.local.md`,
-`.claude/`, `AGENTS.md` under configurable roots with exclusions and depth/
-time limits. Text-mode picker (works in PowerShell, Windows Terminal, SSH);
-`--scan all|none --include --exclude --yes --dry-run`. Read-only in scanned
-folders; dedup by keyed content hash; secret report without values.
-Transcripts are not imported raw. Note: Claude Code deletes transcripts after
-`cleanupPeriodDays` (default 30).
+- **Setup**: check Node, Claude Code, hub, protocol -> register device ->
+  first device: create vault key + recovery key, upload keyring; next device:
+  ask for recovery key, unwrap keyring -> install app + marketplace + plugin
+  -> discovery/import -> write/sync/read self-test -> summary.
+- **Session start**: resolve project from `cwd`, emit the wrapped snapshot,
+  spawn `rembo sync`. No network on this path.
+- **Recall**: `search` -> quick pull if stale -> in-memory scoring -> hits
+  with id, path, device, date -> `read`.
+- **Store**: `remember` -> secret guard -> new entry -> local file + outbox ->
+  push.
+- **Sync**: push outbox, pull log since cursor, apply, run the native-memory
+  bridge, regenerate views.
+- **Discovery** (setup and `rembo scan`): projects Claude Code knows
+  (`~/.claude/projects/*`, real path from the transcripts' `cwd` because
+  folder names are lossy) -> their `CLAUDE.md`, `.claude/CLAUDE.md`,
+  `CLAUDE.local.md`, `.claude/rules/*.md`, `AGENTS.md`, plus native
+  `memory/*.md` and `~/.claude/CLAUDE.md`. Text picker (Enter / space / a /
+  n / filter), non-interactive flags. Extra roots only with `--roots`.
+  Read-only; dedup by keyed content hash; secret report without values.
 
 ## Hub
 
-Node HTTP server (no framework), repository interface over SQLite in WAL mode,
-per-request signature verification, rate limiting, size limits, nonce cache,
-protocol negotiation (ADR-0003), admin CLI (`key`, `account`, `device`,
-`backup`, `status`), daily backup with rotation, `/health`. TLS: built-in
-self-signed + SPKI pin for IP mode, Caddy/existing proxy for domain mode
-(ADR-0010).
+Node HTTP server, `node:sqlite` (WAL) behind a repository interface, bearer
+device tokens, rate limits, size limits, protocol negotiation, admin CLI,
+daily backups, `/health`. TLS: self-signed + pin in IP mode, Caddy or the
+existing proxy in domain mode (ADR-0003, 0010).
 
-## Performance budgets (to be measured in Etap 2)
+## Performance budgets (measured in Etap 2)
 
-| path | budget |
-| --- | --- |
-| SessionStart hook (Node cold start + snapshot) | < 300 ms |
-| UserPromptSubmit hook | < 50 ms (async, returns immediately) |
-| `search` at 10,000 entries | < 200 ms (index resident in the MCP process) |
-| hub down | session unaffected; reads local; writes queued |
+SessionStart < 300 ms · `search` < 200 ms at 10,000 entries · hub down: no
+effect on the session, writes queued.
 
-## Out of scope now (interfaces only)
+## Not in this round
 
-Cloud mode implementation, team vaults, semantic search/reranker, web panel,
-WireGuard mode, publishing.
+Cloud implementation (ADR-0011 design only), classifier (ADR-0009 deferred),
+team vaults, semantic search, web panel, other MCP clients, device linking,
+vault rotation (Etap 6).

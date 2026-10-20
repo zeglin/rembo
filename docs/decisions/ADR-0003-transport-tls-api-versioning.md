@@ -49,14 +49,12 @@ would need `reuse_private_keys`.
 Plain HTTP is refused by the client, except `http://127.0.0.1` / `localhost`
 for development and tests.
 
-### Request signing and proxies
+### Authentication and proxies
 
-Per-request Ed25519 signatures (ADR-0002). Signed: method, path+query as the
-client sent it relative to the configured public base path, body SHA-256,
-timestamp, nonce, protocol version. Never signed: `Host` or other headers a
-proxy may rewrite. Documented proxy requirements: nginx `proxy_pass` **without
-a URI part** (preserves the raw path), hyphenated header names (nginx drops
-`_` headers), `client_max_body_size` >= hub limit.
+`Authorization: Bearer` device tokens (ADR-0002). Documented proxy
+requirements: pass `Authorization` through and do not log it,
+`client_max_body_size` >= hub request limit, hyphenated header names (nginx
+drops `_` headers).
 
 ### Versioning
 

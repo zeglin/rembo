@@ -34,13 +34,12 @@ no native modules, no install scripts) containing:
 ```
 rembo/
   bin/rembo.js           CLI entry (thin; loads dist/cli.js)
-  dist/                  cli.js, hook.js, mcp.js, statusline.js (single files)
+  dist/                  cli.js, hook.js, mcp.js (single files)
   plugin/                the Claude Code plugin, as shipped
     .claude-plugin/plugin.json
-    hooks/hooks.json     classic hooks (template; see below)
-    hooks/mod.ts?        mod module (UX layer, ADR-0007) – compiled .js
-    .mcp.json            stdio server -> dist/mcp.js
-    skills/rembo/SKILL.md
+    hooks/hooks.json     SessionStart + SessionEnd (rendered at setup) + mod module
+    hooks/mod.js         mod (UX layer, ADR-0007)
+    .mcp.json            stdio server -> dist/mcp.js (rendered at setup)
 ```
 
 **Self-install into an app directory, registered as a local marketplace.**
@@ -74,13 +73,12 @@ version and tells the user when they differ (`rembo doctor`). Claude Code's
 own marketplace auto-update is off for third-party marketplaces and is not
 relied upon.
 
-**Settings changes are merged, never replaced.** Every file setup touches
-(`~/.claude/settings.json` via the `claude plugin` CLI where possible; direct
-edits only for the optional status line wrapper and optional read permissions)
-is backed up to `~/.rembo/backup/<timestamp>/` with a manifest of what was
-added. `rembo uninstall` uninstalls the plugin, removes the marketplace,
-reverts only the keys rembo added (so later user edits survive) and offers to
-delete `~/.rembo` (local copy; hub data untouched).
+**No direct edits of Claude Code settings.** Setup changes Claude Code only
+through `claude plugin marketplace add` / `claude plugin install`; before that
+it backs up `~/.claude/settings.json` to `~/.rembo/backup/<timestamp>/`.
+`rembo uninstall` runs `claude plugin uninstall` and `marketplace remove`,
+checks the result against the backup, and offers to delete `~/.rembo` (local
+copy; hub data untouched).
 
 **Non-interactive path:**
 `rembo setup <key> --recovery-file <file> --scan all|none --yes [--hub <url>]`.
@@ -88,7 +86,7 @@ delete `~/.rembo` (local copy; hub data untouched).
 **Install from inside Claude Code (later, Etap 6).** A public marketplace repo
 (`.claude-plugin/marketplace.json` with an `npm` source) allows
 `/plugin install rembo --marketplace <owner>/<repo>`. On first session the mod
-detects "not set up" and offers `/rembo setup` in a pane (the recovery phrase
+detects "not set up" and offers `/rembo setup` in a pane (the recovery key
 must be shown in UI, never in the transcript). Designed, not built in the MVP.
 
 **Node requirement.** See ADR-0008 (Node >= 22).

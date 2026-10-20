@@ -1,49 +1,29 @@
-# ADR-0009: Auto-save classifier (optional, off by default)
+# ADR-0009: Auto-save classifier — deferred
 
-- Status: proposed
-- Date: 2026-10-20
+- Status: deferred (2026-10-20, maintainer decision)
 - Research: docs/research/platform.md §k
 
 ## Decision
 
-**Pipeline.** UserPromptSubmit and Stop hooks (`async: true`) append the
-prompt / `last_assistant_message` to a local, unsynced inbox
-(`~/.rembo/inbox/<session>.jsonl`) and return immediately. A detached worker
-(spawned by the Stop hook if none is running, lock-protected) drains the
-inbox: secret guard (redact) -> provider -> `{score 0..1, category:
-preference|decision|fact|howto|infra|none, scope, summary}` -> if score >=
-threshold (0.8) create an L2 entry (+ L1 note) and sync; else log locally
-(7-day retention, no content beyond the summary). Nothing runs when the
-session is off.
+No classifier in this round. Capture comes from the native memory bridge
+(Claude Code's own auto memory already decides what is worth keeping) and the
+`remember` tool (ADR-0006). Etap 5 is dropped from this round.
 
-**Providers (pluggable `Classifier` interface):**
+A `Classifier` interface stays in `core` so it can be added later if bridged
+native memory proves insufficient. Options already researched, for that day:
 
-| provider | data leaves to | cost / 1000 classifications* | notes |
+| provider | data leaves to | cost / 1000 calls | note |
 | --- | --- | --- | --- |
-| `none` (default) | — | 0 | |
-| `heuristic` | — | 0 | keyword/pattern rules ("remember", "always", "from now on", paths, commands); offline fallback |
-| `claude` | Anthropic (already sees the session) | counts against the user's plan | via the mod's `$.model.complete` (session's own client, small model); no extra key, no new third party; needs the mod (early access) |
-| `jev` | TypeSafe AI | ~$0.025 | the "Jev" from the video: a hosted yes/no / score model, ~100 ms, $0.042 / M input tokens, outputs free (BYOK) |
-| `openrouter` / `openai-compatible` | chosen provider | ~$0.02–0.13 | json_schema output, or a 1-token label with `logprobs` on providers that support it (`provider.require_parameters: true`; non-reasoning models such as mistral-nemo, gemma-3-27b, gpt-4o-mini) |
+| `claude` | Anthropic (already sees the session) | user's plan | mod `$.model.complete`, no extra key |
+| `jev` | TypeSafe AI | ~$0.025 | the "Jev" from the video; BYOK |
+| `openrouter` / OpenAI-compatible | chosen provider | ~$0.02–0.13 | json_schema or 1-token label + logprobs |
+| `heuristic` | — | 0 | offline rules |
 
-\* ~600 input + ~60 output tokens per call (research §k, prices 2026-10-20).
-
-Recommended when the user turns it on: `claude` if the mod is active, else
-`heuristic`; external providers only with an explicit choice. "Treg" from the
-video could not be identified; a similar open-source project (`jevmem`, MIT)
-exists and is worth reading before Etap 5.
-
-**Guards.** Daily call and character caps, timeout (5 s), retries with
-backoff, cost counter in `rembo status`; enabling prints exactly what is sent
-where and requires confirmation (`rembo classifier enable <provider>`);
-toast "Remembered: ... (/rembo forget <id>)" through the mod.
-
-**Evaluation.** ~50 labelled examples (PL + EN) in `packages/core/test/
-classifier/`; report precision/recall at 0.8 and cost per 1000 turns; tests
-use a mock provider until a key is provided.
+Any external provider would be an explicit opt-in that sends redacted
+snippets off the machine (THREAT-MODEL.md).
 
 ## Consequences
 
-- Zero added latency in the session (async hooks + detached worker).
-- The only path where conversation text can reach a third party is an
-  explicit opt-in, and it is listed in THREAT-MODEL.md.
+- No inbox, worker, provider adapters, cost limits or evaluation set now.
+- No conversation text ever leaves the machine except to the model the user
+  is already talking to.

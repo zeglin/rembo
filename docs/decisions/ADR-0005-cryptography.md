@@ -1,80 +1,74 @@
 # ADR-0005: Cryptography
 
-- Status: proposed
+- Status: proposed (revised 2026-10-20 after first-principles review)
 - Date: 2026-10-20
-- Research: docs/research/platform.md (crypto libraries)
 
 ## Decision
 
-### Primitives and libraries (no native modules, no home-made crypto)
+**Only `node:crypto` (OpenSSL).** No third-party crypto dependencies, no WASM,
+no native addons. OpenSSL is the most widely reviewed crypto library there is;
+this satisfies "only proven libraries, no home-made crypto".
 
-| need | primitive | implementation |
-| --- | --- | --- |
-| content encryption | XChaCha20-Poly1305 (24-byte random nonce) | `@noble/ciphers` (audited by Cure53, pure JS, ~3 KB) |
-| phrase -> key | Argon2id (RFC 9106) | `node:crypto.argon2` (Node >= 24.7) else `hash-wasm` (WASM, bundled), same output; feature-tested at runtime |
-| key derivation | HKDF-SHA-256 | `node:crypto` |
-| signatures | Ed25519 | `node:crypto` (`sign(null, ...)`) |
-| key agreement (device link, later) | X25519 | `node:crypto` |
-| random | CSPRNG | `node:crypto.randomBytes` |
-| recovery phrase | BIP-39 English wordlist, 12 words / 128 bits | `@scure/bip39` (audited) |
+| need | choice |
+| --- | --- |
+| content encryption | **AES-256-GCM**, random 96-bit nonce per object, 128-bit tag |
+| key derivation | HKDF-SHA-256 |
+| hashing / ids | SHA-256, HMAC-SHA-256 |
+| randomness | `crypto.randomBytes` |
 
-Byte compatibility with libsodium's `crypto_aead_xchacha20poly1305_ietf` and
-`crypto_pwhash` (Argon2id) is checked with test vectors in CI (libsodium only
-as a dev dependency). libsodium-wrappers itself is not shipped: ~290 KB, and
-Argon2 only in the larger "sumo" build.
+Why AES-256-GCM over (X)ChaCha20-Poly1305: both are in `node:crypto`, but only
+AES-GCM is also in WebCrypto (`crypto.subtle`), which mods and browsers have,
+so the same envelope can later be read by a mod or a web panel with no
+library. Random 96-bit nonces are safe far beyond rembo's scale (collision
+risk stays negligible below ~2^32 objects per key; vaults hold thousands).
+
+**No Argon2, no word list.** Slow KDFs protect low-entropy, human-chosen
+secrets. rembo's recovery key is 256 random bits, so HKDF is sufficient.
 
 ### Keys
 
-- `VK` vault key: 32 random bytes, identified by `kid` (random 8 bytes).
-- From `VK` via HKDF: `k_enc` (content), `k_ids` (keyed ids, ADR-0004/0006).
-- Recovery phrase -> Argon2id(salt = vault id ‖ random 16 B stored in the
-  keyring, t=3, m=64 MiB, p=1) -> `KEK`. With 128-bit phrase entropy these
-  parameters are defence in depth, not the main barrier; they are stored in
-  the keyring so they can be raised later.
-- **Keyring object** (on the hub, itself ciphertext): `{v, kdf params, salt,
-  wrapped: [{kid, XChaCha20-Poly1305(KEK, VK)}]}`. The hub stores it like any
-  object; it is useless without the phrase.
+- **Vault key `VK`**: 32 random bytes with an id `kid`. HKDF gives `k_enc`
+  (content) and `k_ids` (keyed ids for dedup, ADR-0004).
+- **Recovery key**: 32 random bytes, generated on the first device, shown once
+  as `RK-` + base32 groups + checksum (e.g. for a password manager), never
+  stored by rembo, never sent anywhere.
+- **Keyring object** (on the hub, encrypted): `VK` wrapped with
+  `HKDF(recovery key)` via AES-256-GCM. A new device downloads the keyring and
+  unwraps it with the recovery key. Devices store `VK`, not the recovery key.
 
-### Object envelope
+### Envelope
 
 ```
-magic "RMB1" | ver u8 | mode u8 (0 plain, 1 xchacha) | kid [8] | nonce [24] | ciphertext+tag
-AAD = "rembo/obj/v1" ‖ vault_id ‖ object_id ‖ rev (u64 BE)
+"RMB1" | mode u8 (0 = plaintext, 1 = aes-256-gcm) | kid [8] | nonce [12] | ciphertext | tag [16]
+AAD = "rembo/obj/v1" || vault_id || object_id
 ```
 
-- Plaintext: the JSON object of ADR-0006, padded to a bucket (default: next
-  multiple of 512 bytes, configurable; `pad: off` allowed) to blur sizes.
-- The AAD binds each ciphertext to its vault, id and rev: the hub cannot swap
-  objects between ids or vaults, or replay an old version under a newer rev.
-- `mode 0` (encryption off, self-host only, explicit): same envelope, no
-  encryption, so `rembo vault migrate` can switch modes object by object.
+Objects are immutable (ADR-0004), so binding the id is enough: the hub
+cannot move a ciphertext to another id or vault. Plaintext is padded to the
+next 512 bytes by default (`pad: off` allowed) to blur sizes.
 
 ### Encryption on/off
 
-`vault-config` object: `encryption: on|off` (default on; a cloud hub rejects
-off). Changing it = `rembo vault migrate --encryption on|off`, which rewrites
-every object and is resumable.
+Per-vault setting stored in a `vault-config` object (newest wins); default on;
+a cloud hub refuses `off`. `rembo vault migrate` re-uploads everything under
+the new mode as new objects and tombstones the old ones.
 
-### Rotation
+### Rotation (after revoking a device)
 
-`rembo vault rotate` (after a device revocation): new `VK'`, re-encrypt every
-object under `kid'`, update the keyring (wrap `VK'` with the same phrase-
-derived `KEK`; optionally a new phrase). Readers accept any `kid` present in
-the keyring during the rotation; old `kid` is removed at the end. Revoked
-devices cannot fetch the new keyring (API access gone).
+`rembo vault rotate`: new `VK'`, re-encrypt all live entries as new objects,
+tombstone the old ones, publish a new keyring (same recovery key; optionally
+a new one). Revoked devices lose API access and never see `VK'`. Built in
+Etap 6.
 
 ### Local secrets
 
-`~/.rembo/device.json` and `vaults/<id>/key`: files with mode 0600 (POSIX);
-on Windows they rely on the user-profile ACL. OS keychains are not used in the
-MVP (no native modules; Claude Code's own secret store is undocumented and not
-readable by an external CLI). The local markdown copy is plaintext anyway, so
-a stronger store for the key alone would add little against a device
-compromise. Documented in THREAT-MODEL.md.
+`~/.rembo/config.json` (device token) and `vaults/<id>/key`: mode 0600 on
+POSIX, user-profile ACL on Windows. No OS keychain in the MVP (would need
+native code). The local markdown copy is plaintext anyway, so a stronger store
+for the key alone adds little against a compromised device
+(THREAT-MODEL.md).
 
 ## Consequences
 
-- Two small audited dependencies in the client (`@noble/ciphers`,
-  `@scure/bip39`) and one fallback (`hash-wasm`, unaudited but only used to
-  derive the KEK on Node < 24.7). Everything else is `node:crypto`.
-- Losing the phrase and all devices loses the vault, by design.
+- Zero crypto dependencies; works on any Node >= 22 (and in WebCrypto).
+- Losing the recovery key and all devices loses the vault, by design.
