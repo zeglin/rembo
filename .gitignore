@@ -16,3 +16,4 @@ coverage/
 
 # Local portable toolchain (development only)
 .tools/
+rembo-hub-data/

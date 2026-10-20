@@ -1,0 +1,15 @@
+{
+  "name": "rembo",
+  "version": "0.1.0",
+  "description": "Shared, end-to-end encrypted memory for every Claude Code session on every machine",
+  "type": "module",
+  "bin": {
+    "rembo": "bin/rembo.js"
+  },
+  "files": ["bin", "dist"],
+  "engines": {
+    "node": ">=22.12"
+  },
+  "author": "Wojciech Żeglin <hello@rembo.dev>",
+  "license": "MIT"
+}

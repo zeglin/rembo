@@ -1,0 +1,8 @@
+{
+  "name": "rembo-core",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "description": "Shared core of rembo (bundled into rembo and rembo-server; not published)",
+  "license": "MIT"
+}

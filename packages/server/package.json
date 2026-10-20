@@ -1,0 +1,15 @@
+{
+  "name": "rembo-server",
+  "version": "0.1.0",
+  "description": "Self-hosted hub for rembo: shared, end-to-end encrypted memory for Claude Code",
+  "type": "module",
+  "bin": {
+    "rembo-server": "bin/rembo-server.js"
+  },
+  "files": ["bin", "dist"],
+  "engines": {
+    "node": ">=24.16 <25 || >=26.1"
+  },
+  "author": "Wojciech Żeglin <hello@rembo.dev>",
+  "license": "MIT"
+}
