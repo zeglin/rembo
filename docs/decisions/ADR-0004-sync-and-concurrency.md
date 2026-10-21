@@ -36,7 +36,8 @@ insert transaction (`BEGIN IMMEDIATE`), strictly increasing per vault.
   apply a tombstone only if the proof verifies, so the hub cannot forge
   deletions of local copies.
 - `GET /v1/vaults/:vault/changes?since=<seq>&limit=<n>` — records with
-  `seq > since`, plus `head_seq` and `more`.
+  `seq > since` (at most `limit` and ~8 MiB of data, always at least one
+  record), plus `head_seq` and `more` (`last seq < head`).
 
 ### Client
 
@@ -46,15 +47,23 @@ insert transaction (`BEGIN IMMEDIATE`), strictly increasing per vault.
                  projects/*.md, topics/*.md (ADR-0006)
   state.json     cursor (last applied seq)
   outbox/        one file per pending object (atomic create, unique name)
+  failed/        ops the hub refused as invalid (400/413); kept, retryable
+  deferred/      authentic records this version cannot read yet; retried
+                 on every sync (forward compatibility, key rotation)
   lock/          sync lock (mkdir-based, stale after 2 min / dead pid)
 ```
 
 - **Write:** secret guard -> write the entry file atomically -> drop it into
   `outbox/` -> try to push (short timeout). Never waits on the network for
   longer than that; never fails because the hub is down.
-- **Sync** (under the lock): push the outbox (batch), then pull changes since
-  the cursor, decrypt, write files atomically, delete tombstoned files,
-  regenerate views, advance the cursor after each applied page.
+- **Sync** (under the lock): push the outbox (batches of <= 200 items and
+  <= 12 MiB), then pull changes since the cursor, decrypt, write files
+  atomically, delete tombstoned files, advance the cursor after each applied
+  page, regenerate views when entries changed or a local write marked them
+  dirty. A record that fails verification is skipped (counted as rejected);
+  an authentic one this version cannot parse is deferred, never skipped. A
+  refused op never blocks the queue, and push errors other than auth or
+  network do not stop the pull.
 - **Triggers (no daemon):** SessionStart spawns a detached `rembo sync`; the
   MCP server (alive for the whole session) pushes after each write, pulls
   every 60 s, and does a quick pull (<= 1.5 s budget) before `search` when the

@@ -3,9 +3,9 @@ import os from 'node:os';
 import path from 'node:path';
 import { createInterface } from 'node:readline/promises';
 import { parseArgs } from 'node:util';
-import { CLIENT_VERSION, defaultHome, RemboClient } from '../../core/src/client.ts';
+import { CLIENT_VERSION, defaultHome, RemboClient, type SyncResult } from '../../core/src/client.ts';
 import { ENTRY_TYPES, entryToMarkdown, isValidScope, type EntryType } from '../../core/src/entry.ts';
-import { RemboError } from '../../core/src/errors.ts';
+import { RemboError, untrusted } from '../../core/src/errors.ts';
 import { atomicWrite } from '../../core/src/fsutil.ts';
 import { HubClient } from '../../core/src/http.ts';
 import { resolveProject } from '../../core/src/project.ts';
@@ -31,10 +31,10 @@ Memory
   search <query…> [--scope <s>] [--limit <n>]
   read <id>
   list [--scope <s>]
-  forget <id>
+  forget <id> [--only]          Forget an entry and its earlier versions (--only: just this one)
 
 Sync and status
-  sync | status | doctor
+  sync [--retry-failed] | status | doctor
 
 Devices and hub
   device list | device revoke <id>
@@ -99,6 +99,8 @@ export async function main(argv: string[], io: Io = processIo()): Promise<number
       tags: { type: 'string' },
       supersedes: { type: 'string', multiple: true },
       limit: { type: 'string' },
+      only: { type: 'boolean' },
+      'retry-failed': { type: 'boolean' },
       help: { type: 'boolean', short: 'h' },
       version: { type: 'boolean', short: 'v' },
     },
@@ -118,6 +120,16 @@ export async function main(argv: string[], io: Io = processIo()): Promise<number
   }
 
   const open = () => RemboClient.open(home);
+  const syncAfterChange = async (client: RemboClient): Promise<{ sync?: SyncResult; note: string }> => {
+    try {
+      const sync = await client.sync();
+      if (sync.status === 'offline') return { sync, note: ' (saved locally; will sync when the hub is reachable)' };
+      if (sync.status === 'partial') return { sync, note: ` (saved locally; not sent yet: ${sync.error})` };
+      return { sync, note: '' };
+    } catch (e) {
+      return { note: ` (saved locally; sync failed: ${(e as Error).message})` };
+    }
+  };
   const scopeFrom = (fallback: string | undefined): string | undefined => {
     if (values.global) return 'global';
     if (values.scope) {
@@ -152,24 +164,37 @@ export async function main(argv: string[], io: Io = processIo()): Promise<number
           result = await RemboClient.setup(opts);
         } else throw e;
       }
-      const sync = await result.client.sync({ wait: true });
-      result.client.close();
+      const { client } = result;
+      // The recovery key is printed before the first sync, so no later failure can swallow it.
+      if (!json) {
+        io.out(`✓ Device "${client.config.device.name}" registered with ${client.config.hub.url}`);
+        if (result.createdVault) {
+          io.out(`✓ New vault ${result.vaultPending ? 'prepared (the hub confirms it on the next sync)' : 'created'} (encryption ${client.config.vault.encryption ? 'on' : 'OFF'})`);
+          if (result.recoveryKey) {
+            io.out('');
+            io.out('  Your RECOVERY KEY. Save it in your password manager now; it is shown only once.');
+            io.out('  You need it to connect your other machines. Nobody, not even the hub, can recover it:');
+            io.out('');
+            io.out(`    ${result.recoveryKey}`);
+            io.out('');
+          }
+        }
+      }
+      let sync: SyncResult | undefined;
+      let syncError: string | undefined;
+      try {
+        sync = await client.sync({ wait: true });
+      } catch (e) {
+        syncError = (e as Error).message;
+      } finally {
+        client.close();
+      }
       if (json) {
-        print('', { createdVault: result.createdVault, recoveryKey: result.recoveryKey, vault: result.client.config.vault.id, sync });
+        print('', { createdVault: result.createdVault, vaultPending: result.vaultPending, recoveryKey: result.recoveryKey, vault: client.config.vault.id, sync, syncError });
         return 0;
       }
-      io.out(`✓ Device "${result.client.config.device.name}" registered with ${result.client.config.hub.url}`);
-      if (result.createdVault) {
-        io.out(`✓ New vault created (encryption ${result.client.config.vault.encryption ? 'on' : 'OFF'})`);
-        io.out('');
-        io.out('  Your RECOVERY KEY. Save it in your password manager now; it is shown only once.');
-        io.out('  You need it to connect your other machines. Nobody, not even the hub, can recover it:');
-        io.out('');
-        io.out(`    ${result.recoveryKey}`);
-        io.out('');
-      } else {
-        io.out(`✓ Vault unlocked; ${sync.pulled} entries downloaded`);
-      }
+      if (!result.createdVault && sync) io.out(`✓ Vault unlocked; ${sync.pulled} entries downloaded`);
+      if (syncError || (sync && sync.status !== 'ok')) io.out(`! First sync did not finish (${syncError ?? sync?.error ?? sync?.status}); run rembo sync later.`);
       io.out('✓ Ready. Try: rembo remember "Something worth remembering"   then   rembo search something');
       return 0;
     }
@@ -194,8 +219,7 @@ export async function main(argv: string[], io: Io = processIo()): Promise<number
           supersedes: values.supersedes,
           source: { path: io.cwd },
         });
-        const sync = await client.sync();
-        const note = sync.status === 'offline' ? ' (saved locally; will sync when the hub is reachable)' : '';
+        const { sync, note } = await syncAfterChange(client);
         print(`✓ Remembered ${entry.meta.id} [${entry.meta.scope}]${note}`, { entry: entry.meta, sync });
       } finally {
         client.close();
@@ -242,9 +266,10 @@ export async function main(argv: string[], io: Io = processIo()): Promise<number
       if (!rest[0]) throw new UsageError('Usage: rembo forget <id>');
       const client = await open();
       try {
-        await client.forget(rest[0]);
-        const sync = await client.sync();
-        print(`✓ Forgotten ${rest[0]}${sync.status === 'offline' ? ' (locally; the hub will be told when reachable)' : ''}`, { forgotten: rest[0], sync });
+        const ids = await client.forget(rest[0], { only: Boolean(values.only) });
+        const { sync, note } = await syncAfterChange(client);
+        const older = ids.length > 1 ? ` and ${ids.length - 1} earlier version(s)` : '';
+        print(`✓ Forgotten ${rest[0]}${older}${note}`, { forgotten: ids, sync });
       } finally {
         client.close();
       }
@@ -253,13 +278,22 @@ export async function main(argv: string[], io: Io = processIo()): Promise<number
 
     case 'sync': {
       const client = await open();
+      const retried = values['retry-failed'] ? await client.retryFailed() : 0;
       const r = await client.sync({ wait: true });
       client.close();
+      const extra = [
+        retried ? `${retried} failed change(s) retried` : '',
+        r.rejected ? `${r.rejected} rejected (could not be verified)` : '',
+        r.deferred ? `${r.deferred} waiting for a newer rembo (run: rembo update)` : '',
+        r.failed ? `${r.failed} refused by the hub (kept; see rembo doctor)` : '',
+      ].filter(Boolean);
       const human =
         r.status === 'offline'
           ? `! Hub unreachable; ${await client.pendingCount()} change(s) queued. ${r.error ?? ''}`
-          : `✓ Synced: ${r.pushed} sent, ${r.pulled} received, ${r.removed} removed${r.rejected ? `, ${r.rejected} rejected (could not be verified)` : ''}`;
-      print(human, r);
+          : r.status === 'busy'
+            ? '! Another sync is running; try again in a moment.'
+            : `${r.status === 'ok' ? '✓' : '!'} Synced: ${r.pushed} sent, ${r.pulled} received, ${r.removed} removed${extra.length ? `; ${extra.join('; ')}` : ''}${r.status === 'partial' ? `\n  Not sent yet: ${r.error}` : ''}`;
+      print(human, { ...r, retried });
       return r.status === 'ok' ? 0 : 1;
     }
 
@@ -268,9 +302,11 @@ export async function main(argv: string[], io: Io = processIo()): Promise<number
       const entries = liveEntries(await client.loadEntries());
       const last = await client.lastSync();
       const pending = await client.pendingCount();
+      const failed = await client.failedCount();
+      const deferred = await client.deferredCount();
       client.close();
       const c = client.config;
-      const data = { home, hub: c.hub.url, device: c.device, vault: c.vault, entries: entries.length, pending, lastSync: last };
+      const data = { home, hub: c.hub.url, device: c.device, vault: { id: c.vault.id, encryption: c.vault.encryption }, entries: entries.length, pending, failed, deferred, lastSync: last };
       if (json) return print('', { ...data, device: { id: c.device.id, name: c.device.name } }), 0;
       io.out(
         [
@@ -278,7 +314,7 @@ export async function main(argv: string[], io: Io = processIo()): Promise<number
           `hub        ${c.hub.url}${c.hub.certPin ? ' (pinned certificate)' : ''}`,
           `device     ${c.device.name} (${c.device.id})`,
           `vault      ${c.vault.id} (encryption ${c.vault.encryption ? 'on' : 'OFF'})`,
-          `entries    ${entries.length}, pending uploads ${pending}`,
+          `entries    ${entries.length}, pending uploads ${pending}${failed ? `, ${failed} refused by the hub` : ''}${deferred ? `, ${deferred} need a newer rembo` : ''}`,
           `last sync  ${last ? `${last.at} ${last.ok ? 'ok' : 'failed: ' + last.error}` : 'never'}`,
           `local copy ${path.join(home, 'vaults', c.vault.id, 'md')}`,
         ].join('\n'),
@@ -296,7 +332,7 @@ export async function main(argv: string[], io: Io = processIo()): Promise<number
           const devices = await client.listDevices();
           if (json) return print('', { devices }), 0;
           for (const d of devices) {
-            io.out(`${d.current ? '*' : ' '} ${d.id}  ${d.name.padEnd(20)} ${d.platform.padEnd(14)} ${d.revoked ? 'REVOKED' : `last seen ${d.lastSeen ?? 'never'}`}`);
+            io.out(`${d.current ? '*' : ' '} ${untrusted(d.id, 40)}  ${untrusted(d.name, 40).padEnd(20)} ${untrusted(d.platform, 40).padEnd(14)} ${d.revoked ? 'REVOKED' : `last seen ${untrusted(d.lastSeen ?? 'never', 40)}`}`);
           }
         } else if (rest[0] === 'revoke' && rest[1]) {
           await client.revokeDevice(rest[1]);
@@ -350,7 +386,11 @@ async function doctor(home: string, io: Io, json: boolean): Promise<number> {
     }
     const pending = await client.pendingCount();
     const last = await client.lastSync();
-    add('sync', pending === 0 && (last?.ok ?? false), `${pending} pending, last sync ${last ? `${last.at} ${last.ok ? 'ok' : 'failed'}` : 'never'}`, 'Run: rembo sync');
+    add('sync', pending === 0 && (last?.ok ?? false), `${pending} pending, last sync ${last ? `${last.at} ${last.ok ? 'ok' : `failed (${last.error ?? '?'})`}` : 'never'}`, 'Run: rembo sync');
+    const failed = await client.failedCount();
+    if (failed) add('failed', false, `${failed} change(s) refused by the hub, kept in ${client.vault.failedDir}`, 'After fixing the cause (e.g. a hub update): rembo sync --retry-failed');
+    const deferred = await client.deferredCount();
+    if (deferred) add('update', false, `${deferred} entr(ies) written by a newer rembo, kept until this one is updated`, 'Run: rembo update');
     try {
       const probe = path.join(home, `.doctor-${process.pid}`);
       await atomicWrite(probe, 'ok');

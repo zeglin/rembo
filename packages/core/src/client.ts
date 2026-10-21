@@ -25,7 +25,7 @@ import {
   type EntryType,
 } from './entry.ts';
 import { RemboError } from './errors.ts';
-import { atomicWrite, readJson, tryLock, waitLock } from './fsutil.ts';
+import { atomicWrite, readJson, tryLock, waitLock, type LockHandle } from './fsutil.ts';
 import { scanSecrets } from './guard.ts';
 import { HubClient, HubError, type HubEndpoint } from './http.ts';
 import { decodeAccountKey } from './keys.ts';
@@ -54,7 +54,8 @@ export interface ClientConfig {
   hub: HubEndpoint;
   device: { id: string; token: string; name: string };
   accountId: string;
-  vault: { id: string; encryption: boolean };
+  /** pendingKeyring: a new vault the hub has not confirmed yet; the next sync creates it. */
+  vault: { id: string; encryption: boolean; pendingKeyring?: string };
   defaults: { mode: 'on' | 'off' };
 }
 
@@ -71,6 +72,8 @@ export interface SetupOptions {
 export interface SetupResult {
   client: RemboClient;
   createdVault: boolean;
+  /** The hub was unreachable after registration; the vault is created on the next sync. */
+  vaultPending: boolean;
   recoveryKey?: string;
 }
 
@@ -87,11 +90,17 @@ export interface RememberInput {
 }
 
 export interface SyncResult {
-  status: 'ok' | 'busy' | 'offline';
+  /** partial: received everything, but some local changes could not be sent yet (see error). */
+  status: 'ok' | 'partial' | 'busy' | 'offline';
   pushed: number;
   pulled: number;
   removed: number;
+  /** Records that failed verification (hub forgery or corruption); skipped. */
   rejected: number;
+  /** Authentic records this version cannot read yet; kept and retried after an update. */
+  deferred: number;
+  /** Local changes the hub refused as invalid; moved to failed/ (rembo sync --retry-failed). */
+  failed: number;
   cursor?: number;
   head?: number;
   error?: string;
@@ -104,8 +113,53 @@ export interface SyncStatus {
   error?: string | undefined;
 }
 
+function isTombstoneFor(proof: Buffer, id: string): boolean {
+  try {
+    return (JSON.parse(proof.toString('utf8')) as { deleted?: string }).deleted === id;
+  } catch {
+    return false;
+  }
+}
+
 export function defaultHome(): string {
   return process.env.REMBO_HOME || path.join(os.homedir(), '.rembo');
+}
+
+const PUT_BATCH_ITEMS = 200;
+const PUT_BATCH_CHARS = 12 << 20; // base64 characters per request, under the hub's 16 MiB body limit
+
+/** Hub answers that refuse one op for good (invalid or too large): retrying cannot help. */
+const isRejection = (e: unknown): e is HubError => e instanceof HubError && (e.status === 400 || e.status === 413);
+
+/** Push failures after which pulling still makes sense: the hub is up and this device is valid. */
+const pullAnyway = (e: unknown): e is HubError =>
+  e instanceof HubError && ([403, 404, 409, 429].includes(e.status) || e.status >= 500);
+
+function putBatches(ops: PendingOp[]): PendingOp[][] {
+  const batches: PendingOp[][] = [];
+  let batch: PendingOp[] = [];
+  let chars = 0;
+  for (const op of ops) {
+    const size = op.op.op === 'put' ? op.op.data.length : 0;
+    if (batch.length && (batch.length >= PUT_BATCH_ITEMS || chars + size > PUT_BATCH_CHARS)) {
+      batches.push(batch);
+      batch = [];
+      chars = 0;
+    }
+    batch.push(op);
+    chars += size;
+  }
+  if (batch.length) batches.push(batch);
+  return batches;
+}
+
+/** Creates a vault on the hub; a 409 means an earlier attempt already did (vault ids are random). */
+async function createVaultOnHub(hub: HubClient, body: { id: string; encryption: boolean; keyring: string }): Promise<void> {
+  try {
+    await hub.request('POST', '/v1/vaults', body);
+  } catch (e) {
+    if (!(e instanceof HubError && e.status === 409)) throw e;
+  }
 }
 
 const configPath = (home: string) => path.join(home, 'config.json');
@@ -156,6 +210,8 @@ export class RemboClient {
     const recovery = opts.recoveryKey ? parseRecoveryKey(opts.recoveryKey) : undefined;
     const endpoint: HubEndpoint = { url: opts.hubUrl ?? account.hub ?? DEFAULT_CLOUD_URL, certPin: account.certPin };
     const hub = new HubClient(endpoint);
+    let deviceId: string | undefined;
+    let keyFile: string | undefined;
     try {
       await hub.request<HealthResponse>('GET', '/health');
       const reg = await hub.request<RegisterResponse>(
@@ -164,9 +220,10 @@ export class RemboClient {
         { name: opts.deviceName ?? os.hostname(), platform: opts.platform ?? `${process.platform}-${process.arch}` },
         { bearer: opts.accountKey.trim() },
       );
+      deviceId = reg.deviceId;
       hub.setToken(reg.token);
 
-      let vaultInfo: VaultInfo;
+      let vault: ClientConfig['vault'];
       let vaultKey: VaultKey;
       let recoveryText: string | undefined;
       const existing = reg.vaults[0];
@@ -175,7 +232,7 @@ export class RemboClient {
           throw new RemboError(
             'recovery_key_required',
             'This account already has a vault; this machine needs the recovery key to unlock it.',
-            'Run setup again with --recovery-key RK-… (shown when the first machine was set up).',
+            'Run setup again in a terminal (it asks for the key), or pass --recovery-file <file>.',
           );
         }
         if (!VAULT_ID_RE.test(existing.id)) throw new RemboError('bad_hub_response', 'The hub returned an invalid vault id.');
@@ -183,14 +240,13 @@ export class RemboClient {
         const opened = openKeyring(Buffer.from(kr.keyring, 'base64url'), recovery, existing.id);
         vaultKey = opened.vaultKey;
         // The encryption flag is taken from the authenticated keyring, not from the hub's answer.
-        vaultInfo = { id: existing.id, encryption: opened.encryption, keyringVersion: existing.keyringVersion };
+        vault = { id: existing.id, encryption: opened.encryption };
       } else {
         const id = randomId();
         const rk = recovery ?? newRecoveryKey();
-        vaultKey = newVaultKey();
         const encryption = opts.encryption ?? true;
-        await hub.request('POST', '/v1/vaults', { id, encryption, keyring: sealKeyring(vaultKey, rk, id, encryption).toString('base64url') });
-        vaultInfo = { id, encryption, keyringVersion: 1 };
+        vaultKey = newVaultKey();
+        vault = { id, encryption, pendingKeyring: sealKeyring(vaultKey, rk, id, encryption).toString('base64url') };
         recoveryText = recovery ? undefined : formatRecoveryKey(rk);
       }
 
@@ -199,16 +255,35 @@ export class RemboClient {
         hub: hub.endpoint,
         device: { id: reg.deviceId, token: reg.token, name: opts.deviceName ?? os.hostname() },
         accountId: reg.accountId,
-        vault: { id: vaultInfo.id, encryption: vaultInfo.encryption },
+        vault,
         defaults: { mode: 'on' },
       };
-      const vault = new LocalVault(opts.home, vaultInfo.id);
-      await atomicWrite(vault.keyFile, JSON.stringify({ kid: vaultKey.kid.toString('hex'), key: vaultKey.key.toString('hex') }), 0o600);
+      // Local files first: once the vault exists on the hub, this machine already holds its key.
+      keyFile = new LocalVault(opts.home, vault.id).keyFile;
+      await atomicWrite(keyFile, JSON.stringify({ kid: vaultKey.kid.toString('hex'), key: vaultKey.key.toString('hex') }), 0o600);
       await atomicWrite(configPath(opts.home), JSON.stringify(config, null, 2), 0o600);
+      if (vault.pendingKeyring) {
+        try {
+          await createVaultOnHub(hub, { id: vault.id, encryption: vault.encryption, keyring: vault.pendingKeyring });
+          delete vault.pendingKeyring;
+          await atomicWrite(configPath(opts.home), JSON.stringify(config, null, 2), 0o600);
+        } catch (e) {
+          // The hub went away between registration and creation: keep everything; the next sync creates the vault.
+          if (!(e instanceof HubError && e.code === 'unreachable')) throw e;
+        }
+      }
       const client = new RemboClient(opts.home, config, vaultKey);
-      const result: SetupResult = { client, createdVault: !existing };
+      const result: SetupResult = { client, createdVault: !existing, vaultPending: Boolean(vault.pendingKeyring) };
       if (recoveryText) result.recoveryKey = recoveryText;
       return result;
+    } catch (e) {
+      // Leave neither a half-configured machine nor a stray device on the hub.
+      if (keyFile) {
+        await fs.rm(configPath(opts.home), { force: true });
+        await fs.rm(keyFile, { force: true });
+      }
+      if (deviceId) await hub.request('DELETE', `/v1/devices/${encodeURIComponent(deviceId)}`).catch(() => undefined);
+      throw e;
     } finally {
       hub.close();
     }
@@ -250,14 +325,31 @@ export class RemboClient {
     if (envelope.length > LIMITS.objectBytes) throw new RemboError('too_large', 'This entry is too large (max 1 MiB).', 'Split it or store a summary.');
     await this.vault.writeEntry(entry);
     await this.vault.enqueue({ op: 'put', id: entry.meta.id, data: envelope.toString('base64url') });
+    await this.vault.markViewsDirty();
     return entry;
   }
 
-  async forget(id: string): Promise<boolean> {
-    const existed = await this.vault.deleteEntry(id);
-    if (!existed) throw new RemboError('not_found', `No entry with id ${id} on this machine.`, 'Run rembo sync, then try again.');
-    await this.vault.enqueue({ op: 'delete', id, proof: this.tombstoneProof(id).toString('base64url') });
-    return true;
+  /**
+   * Forgets an entry and, unless `only`, every earlier version it supersedes,
+   * so an older version cannot resurface. Returns the forgotten ids.
+   */
+  async forget(id: string, opts: { only?: boolean } = {}): Promise<string[]> {
+    if (!(await this.vault.findEntryFile(id))) {
+      throw new RemboError('not_found', `No entry with id ${id} on this machine.`, 'Run rembo sync, then try again.');
+    }
+    const ids = [id];
+    if (!opts.only) {
+      const byId = new Map((await this.loadEntries()).map((e) => [e.meta.id, e]));
+      for (let i = 0; i < ids.length; i++) {
+        for (const older of byId.get(ids[i]!)?.meta.supersedes ?? []) if (!ids.includes(older)) ids.push(older);
+      }
+    }
+    for (const x of ids) {
+      await this.vault.deleteEntry(x);
+      await this.vault.enqueue({ op: 'delete', id: x, proof: this.tombstoneProof(x).toString('base64url') });
+    }
+    await this.vault.markViewsDirty();
+    return ids;
   }
 
   /** A delete marker sealed with the vault key: other devices honour only tombstones a device created. */
@@ -268,20 +360,6 @@ export class RemboClient {
       keys: this.keys,
       encrypt: this.config.vault.encryption,
     });
-  }
-
-  private validTombstone(r: ChangeRecord): boolean {
-    try {
-      const plain = openObject(Buffer.from(r.data ?? '', 'base64url'), {
-        vaultId: this.vault.vaultId,
-        objectId: `tombstone:${r.id}`,
-        keys: this.keys,
-        allowPlain: !this.config.vault.encryption,
-      });
-      return (JSON.parse(plain.toString('utf8')) as { deleted?: string }).deleted === r.id;
-    } catch {
-      return false;
-    }
   }
 
   async loadEntries(): Promise<Entry[]> {
@@ -298,82 +376,185 @@ export class RemboClient {
     return index.search(query, opts);
   }
 
-  private decodeRecord(r: ChangeRecord): Entry | null {
+  /**
+   * The authenticated plaintext of a record; 'later' when it uses a key or
+   * format this version does not have (e.g. after a key rotation by a newer
+   * rembo); null when it was not sealed for this vault and id.
+   */
+  private openRecord(data: string | undefined, objectId: string): Buffer | 'later' | null {
     try {
-      const plain = openObject(Buffer.from(r.data ?? '', 'base64url'), {
+      return openObject(Buffer.from(data ?? '', 'base64url'), {
         vaultId: this.vault.vaultId,
-        objectId: r.id,
+        objectId,
         keys: this.keys,
         allowPlain: !this.config.vault.encryption,
       });
-      const entry = entryFromPlaintext(plain);
-      return entry.meta.id === r.id ? entry : null; // an id swap would be caught by AAD anyway
-    } catch {
-      return null;
+    } catch (e) {
+      return e instanceof RemboError && (e.code === 'unknown_key' || e.code === 'unsupported') ? 'later' : null;
     }
   }
 
-  private async pushOutbox(): Promise<number> {
+  /** Applies one hub record; returns whether local entries changed. */
+  private async applyRecord(r: ChangeRecord, result: SyncResult): Promise<boolean> {
+    if (typeof r.id !== 'string' || !OBJECT_ID_RE.test(r.id)) {
+      result.rejected++; // never let a hub-supplied id reach the filesystem
+      return false;
+    }
+    const defer = async () => {
+      await this.vault.defer({ seq: r.seq, id: r.id, kind: r.kind, data: r.data ?? '' });
+      result.deferred++;
+      return false;
+    };
+    if (r.kind === 'tombstone') {
+      const proof = this.openRecord(r.data, `tombstone:${r.id}`);
+      if (proof === 'later') return defer();
+      if (!proof || !isTombstoneFor(proof, r.id)) {
+        result.rejected++; // forged by the hub: keep the local copy
+        return false;
+      }
+      const deleted = await this.vault.deleteEntry(r.id);
+      const dropped = await this.vault.removeDeferredFor(r.id);
+      if (deleted || dropped) result.removed++;
+      return deleted;
+    }
+    if (r.kind !== 'put') return defer(); // a record kind from a newer protocol
+    const plain = this.openRecord(r.data, r.id);
+    if (plain === 'later') return defer();
+    if (!plain) {
+      result.rejected++;
+      return false;
+    }
+    let entry: Entry;
+    try {
+      entry = entryFromPlaintext(plain);
+      if (entry.meta.id !== r.id) throw new Error('id mismatch');
+    } catch {
+      return defer(); // authentic, but written by a newer rembo: keep it for after an update
+    }
+    if (await this.vault.hasEntry(entry.meta)) return false;
+    await this.vault.writeEntry(entry);
+    result.pulled++;
+    return true;
+  }
+
+  /** Retries records an earlier version could not read; those still unreadable are deferred again. */
+  private async retryDeferred(result: SyncResult): Promise<boolean> {
+    let changed = false;
+    for (const { file, record } of await this.vault.deferredRecords()) {
+      const r: ChangeRecord = { seq: record.seq, id: record.id, kind: record.kind as ChangeRecord['kind'], device: null, at: '' };
+      if (record.data) r.data = record.data;
+      const before = result.deferred;
+      if (await this.applyRecord(r, result)) changed = true;
+      if (result.deferred === before) await this.vault.removeDeferredFile(file); // applied or rejected; a re-deferral rewrote the file
+    }
+    return changed;
+  }
+
+  private async putBatch(batch: PendingOp[]): Promise<void> {
+    await this.hub.request<{ results: PutResult[] }>('POST', `/v1/vaults/${this.vault.vaultId}/objects`, {
+      items: batch.map((o) => ({ id: o.op.id, data: (o.op as { data: string }).data })),
+    });
+  }
+
+  /** Sends one op; an op the hub refuses as invalid moves to failed/ instead of blocking the queue. */
+  private async pushOne(op: PendingOp, send: () => Promise<unknown>, result: SyncResult): Promise<void> {
+    try {
+      await send();
+      await this.vault.removeOps([op]);
+      result.pushed++;
+    } catch (e) {
+      if (!isRejection(e)) throw e;
+      await this.vault.failOp(op, `${e.code}: ${e.message}`);
+      result.failed++;
+    }
+  }
+
+  private async pushOutbox(result: SyncResult, lock: LockHandle): Promise<void> {
     const ops = await this.vault.pendingOps();
-    const puts = ops.filter((o): o is PendingOp & { op: { op: 'put' } } => o.op.op === 'put');
-    let pushed = 0;
-    for (let i = 0; i < puts.length; i += 200) {
-      const chunk = puts.slice(i, i + 200);
-      await this.hub.request<{ results: PutResult[] }>('POST', `/v1/vaults/${this.vault.vaultId}/objects`, {
-        items: chunk.map((o) => ({ id: o.op.id, data: (o.op as { data: string }).data })),
-      });
-      await this.vault.removeOps(chunk);
-      pushed += chunk.length;
+    for (const batch of putBatches(ops.filter((o) => o.op.op === 'put'))) {
+      try {
+        await this.putBatch(batch);
+        await this.vault.removeOps(batch);
+        result.pushed += batch.length;
+      } catch (e) {
+        if (!isRejection(e)) throw e;
+        // Find the op the hub refuses by sending the batch one by one.
+        for (const op of batch) await this.pushOne(op, () => this.putBatch([op]), result);
+      }
+      await lock.refresh();
     }
     for (const del of ops.filter((o) => o.op.op === 'delete')) {
-      await this.hub.request('DELETE', `/v1/vaults/${this.vault.vaultId}/objects/${del.op.id}`, { proof: (del.op as { proof: string }).proof });
-      await this.vault.removeOps([del]);
-      pushed++;
+      const { id, proof } = del.op as { id: string; proof: string };
+      await this.pushOne(del, () => this.hub.request('DELETE', `/v1/vaults/${this.vault.vaultId}/objects/${id}`, { proof }), result);
     }
-    return pushed;
+  }
+
+  /** Views follow local entries with or without the network (e.g. an offline forget); never throws. */
+  private async refreshViews(changed: boolean): Promise<void> {
+    try {
+      if ((await this.vault.takeViewsDirty()) || changed) await this.vault.writeViews(liveEntries(await this.loadEntries()));
+    } catch {
+      await this.vault.markViewsDirty().catch(() => undefined); // try again on the next sync
+    }
+  }
+
+  /** Finishes a vault creation that setup could not confirm. */
+  private async finishVaultCreation(): Promise<void> {
+    const keyring = this.config.vault.pendingKeyring;
+    if (!keyring) return;
+    await createVaultOnHub(this.hub, { id: this.vault.vaultId, encryption: this.config.vault.encryption, keyring });
+    delete this.config.vault.pendingKeyring;
+    await this.saveConfig();
   }
 
   /** Push the outbox, then pull the log since the cursor and apply it. */
   async sync(opts: { wait?: boolean; waitMs?: number } = {}): Promise<SyncResult> {
     const lock = opts.wait ? await waitLock(this.vault.lockDir, opts.waitMs ?? 30_000) : await tryLock(this.vault.lockDir);
-    const result: SyncResult = { status: 'ok', pushed: 0, pulled: 0, removed: 0, rejected: 0 };
+    const result: SyncResult = { status: 'ok', pushed: 0, pulled: 0, removed: 0, rejected: 0, deferred: 0, failed: 0 };
     if (!lock) return { ...result, status: 'busy' };
+    let changed = false;
     try {
-      result.pushed = await this.pushOutbox();
+      await this.finishVaultCreation();
+      let pushError: HubError | undefined;
+      try {
+        await this.pushOutbox(result, lock);
+      } catch (e) {
+        if (!pullAnyway(e)) throw e;
+        pushError = e; // one stuck upload must not stop this machine from receiving
+      }
+      changed = await this.retryDeferred(result);
       let state = await this.vault.readState();
-      let changed = result.pushed > 0;
       for (;;) {
         const page = await this.hub.request<ChangesResponse>(
           'GET',
           `/v1/vaults/${this.vault.vaultId}/changes?since=${state.cursor}&limit=${LIMITS.changesPage}`,
         );
+        if (!Array.isArray(page?.records)) throw new HubError(0, 'bad_hub_response', 'The hub sent an invalid change list.');
+        const before = state.cursor;
         for (const r of page.records) {
-          if (!OBJECT_ID_RE.test(r.id)) {
-            result.rejected++; // never let a hub-supplied id reach the filesystem
-          } else if (r.kind === 'tombstone') {
-            if (!this.validTombstone(r)) result.rejected++; // forged by the hub: keep the local copy
-            else if (await this.vault.deleteEntry(r.id)) {
-              result.removed++;
-              changed = true;
-            }
-          } else {
-            const entry = this.decodeRecord(r);
-            if (!entry) result.rejected++;
-            else if (!(await this.vault.hasEntry(entry.meta))) {
-              await this.vault.writeEntry(entry);
-              result.pulled++;
-              changed = true;
-            }
+          if (!Number.isSafeInteger(r?.seq) || r.seq <= state.cursor) {
+            result.rejected++; // out of order: never move the cursor backwards
+            continue;
           }
+          if (await this.applyRecord(r, result)) changed = true;
           state = { cursor: r.seq };
         }
         await this.vault.writeState(state);
+        await lock.refresh();
         result.head = page.head;
-        if (!page.more) break;
+        if (!page.more || state.cursor === before) break; // no progress: a buggy or hostile hub must not keep us looping
       }
       result.cursor = state.cursor;
-      if (changed) await this.vault.writeViews(liveEntries(await this.loadEntries()));
-      await this.writeStatus({ ok: true, at: new Date().toISOString(), pending: (await this.vault.pendingOps()).length });
+      if (pushError) {
+        result.status = 'partial';
+        result.error = pushError.message;
+      }
+      await this.writeStatus({
+        ok: !pushError,
+        at: new Date().toISOString(),
+        pending: (await this.vault.pendingOps()).length,
+        error: pushError?.code,
+      });
       return result;
     } catch (e) {
       const code = e instanceof RemboError ? e.code : 'error';
@@ -381,6 +562,7 @@ export class RemboClient {
       if (e instanceof HubError && e.code === 'unreachable') return { ...result, status: 'offline', error: e.message };
       throw e;
     } finally {
+      await this.refreshViews(changed);
       await lock.release();
     }
   }
@@ -395,6 +577,19 @@ export class RemboClient {
 
   async pendingCount(): Promise<number> {
     return (await this.vault.pendingOps()).length;
+  }
+
+  async failedCount(): Promise<number> {
+    return this.vault.failedCount();
+  }
+
+  async deferredCount(): Promise<number> {
+    return (await this.vault.deferredRecords()).length;
+  }
+
+  /** Puts changes the hub refused back into the queue (e.g. after a hub fix). */
+  async retryFailed(): Promise<number> {
+    return this.vault.retryFailed();
   }
 
   async listDevices(): Promise<DeviceInfo[]> {

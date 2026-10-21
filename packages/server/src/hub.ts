@@ -162,7 +162,12 @@ export function createHandler(opts: HubOptions): http.RequestListener {
     let match: RegExpExecArray | null = null;
     const r = ROUTES.find((rt) => rt.method === method && (match = rt.re.exec(url.pathname)));
     if (!r || !match) throw notFound();
-    const params = (match as RegExpExecArray).slice(1).map(decodeURIComponent);
+    let params: string[];
+    try {
+      params = (match as RegExpExecArray).slice(1).map(decodeURIComponent);
+    } catch {
+      throw new ApiError(400, 'bad_request', 'Malformed URL.');
+    }
 
     if (r.name === 'health') return { status: 200, body: { ok: true, protocol: { min: PROTOCOL_MIN, max: PROTOCOL_MAX } } };
 
@@ -260,7 +265,8 @@ export function createHandler(opts: HubOptions): http.RequestListener {
         if (!Number.isInteger(since) || since < 0 || !Number.isInteger(limit)) throw new ApiError(400, 'bad_request', 'Invalid "since" or "limit".');
         const { records, head } = db.changes(vault.id, since, limit);
         const last = records.at(-1)?.seq ?? since;
-        return ok({ records, head, more: last < head && records.length === limit });
+        // The head record is never erased (only a later tombstone erases a put), so last < head means more.
+        return ok({ records, head, more: last < head });
       }
     }
     throw notFound();

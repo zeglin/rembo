@@ -31,6 +31,8 @@ Status: draft for review (Etap 0), 2026-10-20.
 | Hub tampering with objects | AEAD with AAD = vault id + object id; objects are immutable, so any change or swap is detected (ADR-0004/0005) |
 | Leaked hub DB used to impersonate devices | hub stores only SHA-256 hashes of high-entropy account keys and device tokens (ADR-0002) |
 | Network eavesdropping / MITM | TLS only, no plain HTTP; IP mode pins the hub's SPKI from the account key; domain mode uses WebPKI (ADR-0003) |
+| TLS interception by local software (antivirus "web shields", company proxies) | refused like any MITM: the pin does not match a re-signed certificate, and Node's CA store does not contain the interceptor's root. The error names the issuer (`tls_intercepted`) and tells the user to add an exception there; rembo never falls back to an unpinned connection |
+| Hostile or buggy hub answers (oversized pages, endless "more", out-of-order records, terminal escape sequences in messages) | response size cap, no-progress stop, cursor never moves backwards, hub text stripped of control and bidi characters before printing or showing to a model |
 | Stolen device token (e.g. a proxy logging headers) | allows downloading ciphertext and deleting records only; per-device revocation; daily hub backups; full local copy on every device |
 | Unauthorized device | registration requires the account key (stored only as a hash on the hub); device limit; per-device revocation; `vault rotate` after revocation |
 | Brute force / scanning | no unauthenticated endpoints except `/health` (no data); constant-time checks; no account enumeration (uniform 401); rate limits and temporary lockouts; request size limits |

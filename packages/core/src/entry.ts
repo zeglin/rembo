@@ -26,11 +26,15 @@ export interface EntryMeta {
 export interface Entry {
   meta: EntryMeta;
   body: string;
+  /** Frontmatter fields this version does not know (written by a newer rembo); kept as-is. */
+  extra?: Record<string, unknown>;
 }
 
 const FIELD_ORDER: (keyof EntryMeta)[] = [
   'id', 'type', 'title', 'summary', 'scope', 'tags', 'source', 'created', 'author_device', 'supersedes',
 ];
+const KNOWN_FIELDS = new Set<string>(FIELD_ORDER);
+const EXTRA_KEY_RE = /^[a-z][a-z0-9_]{0,39}$/;
 const ID_RE = /^[A-Za-z0-9_-]{16,64}$/;
 const SCOPE_RE = /^(global|project:[a-z0-9][a-z0-9._-]*|machine:[a-z0-9][a-z0-9._-]*)$/;
 
@@ -78,7 +82,10 @@ export function validateEntry(input: { meta: Partial<EntryMeta>; body?: unknown 
     supersedes,
   };
   if (typeof m.author_device === 'string') meta.author_device = m.author_device;
-  return { meta, body: typeof input.body === 'string' ? input.body.trimEnd() : '' };
+  const entry: Entry = { meta, body: typeof input.body === 'string' ? input.body.trimEnd() : '' };
+  const extra = Object.entries(m).filter(([k, v]) => !KNOWN_FIELDS.has(k) && EXTRA_KEY_RE.test(k) && v !== undefined);
+  if (extra.length) entry.extra = Object.fromEntries(extra);
+  return entry;
 }
 
 /** Markdown with frontmatter; every value is JSON (valid YAML flow syntax). */
@@ -88,6 +95,7 @@ export function entryToMarkdown(entry: Entry): string {
     const value = entry.meta[key];
     if (value !== undefined) lines.push(`${key}: ${JSON.stringify(value)}`);
   }
+  for (const [key, value] of Object.entries(entry.extra ?? {})) lines.push(`${key}: ${JSON.stringify(value)}`);
   lines.push('---', '');
   return lines.join('\n') + entry.body.trimEnd() + '\n';
 }
@@ -112,7 +120,7 @@ export function entryFromMarkdown(text: string): Entry {
 }
 
 export function entryToPlaintext(entry: Entry): Buffer {
-  return Buffer.from(JSON.stringify({ v: 1, meta: entry.meta, body: entry.body }), 'utf8');
+  return Buffer.from(JSON.stringify({ v: 1, meta: { ...entry.extra, ...entry.meta }, body: entry.body }), 'utf8');
 }
 
 export function entryFromPlaintext(data: Buffer): Entry {

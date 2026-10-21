@@ -1,5 +1,6 @@
 import { describe, expect, test } from 'vitest';
 import { entryFromMarkdown, entryFromPlaintext, entryRelPath, entryToMarkdown, entryToPlaintext, slugify, validateEntry, type Entry } from '../src/entry.ts';
+import { untrusted } from '../src/errors.ts';
 import { redactSecrets, scanSecrets } from '../src/guard.ts';
 import { normalizeGitRemote } from '../src/project.ts';
 import { MemorySearch } from '../src/search.ts';
@@ -136,5 +137,20 @@ describe('project identity', () => {
     expect(normalizeGitRemote('https://github.com/owner/repo')).toBe('github.com/owner/repo');
     expect(normalizeGitRemote('ssh://git@gitlab.example.com:2222/group/sub/repo.git')).toBe('gitlab.example.com/group/sub/repo');
     expect(normalizeGitRemote('not a url')).toBeNull();
+  });
+});
+
+describe('forward compatibility and untrusted text', () => {
+  test('frontmatter fields from a newer version survive markdown and plaintext round trips', () => {
+    const base = entry();
+    const newer = validateEntry({ meta: { ...base.meta, expires: '2030-01-01', 'Bad Key': 1 } as never, body: 'b' });
+    expect(newer.extra).toEqual({ expires: '2030-01-01' });
+    expect(entryFromMarkdown(entryToMarkdown(newer)).extra).toEqual({ expires: '2030-01-01' });
+    expect(entryFromPlaintext(entryToPlaintext(newer)).extra).toEqual({ expires: '2030-01-01' });
+  });
+
+  test('untrusted text loses escape sequences and is bounded', () => {
+    expect(untrusted('ok\u001b[2J\u001b]0;pwned\u0007 done‮')).toBe('ok [2J ]0;pwned done');
+    expect(untrusted('x'.repeat(500)).length).toBe(300);
   });
 });

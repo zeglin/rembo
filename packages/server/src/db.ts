@@ -1,6 +1,6 @@
 import { randomBytes } from 'node:crypto';
 import { DatabaseSync, type StatementSync } from 'node:sqlite';
-import type { ChangeRecord, PutResult, VaultInfo } from '../../core/src/protocol.ts';
+import { LIMITS, type ChangeRecord, type PutResult, type VaultInfo } from '../../core/src/protocol.ts';
 
 const SCHEMA_V1 = `
 CREATE TABLE accounts (
@@ -263,21 +263,21 @@ export class HubDb {
     });
   }
 
-  changes(vaultId: string, since: number, limit: number): { records: ChangeRecord[]; head: number } {
+  /** Records after `since`, at most `limit` and about `maxBytes` of data (always at least one record). */
+  changes(vaultId: string, since: number, limit: number, maxBytes: number = LIMITS.changesPageBytes): { records: ChangeRecord[]; head: number } {
     const head = Number((this.s.head!.get(vaultId) as { head_seq: number }).head_seq);
-    const rows = this.s.changes!.all(vaultId, since, limit) as {
-      seq: number;
-      object_id: string;
-      kind: 'put' | 'tombstone';
-      data: Uint8Array | null;
-      device_id: string | null;
-      created_at: string;
-    }[];
-    const records = rows.map((r) => {
+    const records: ChangeRecord[] = [];
+    let bytes = 0;
+    // iterate() streams rows, so a page of large objects never sits in memory all at once.
+    for (const row of this.s.changes!.iterate(vaultId, since, limit)) {
+      const r = row as { seq: number; object_id: string; kind: 'put' | 'tombstone'; data: Uint8Array | null; device_id: string | null; created_at: string };
+      const size = r.data?.length ?? 0;
+      if (records.length > 0 && bytes + size > maxBytes) break;
+      bytes += size;
       const rec: ChangeRecord = { seq: Number(r.seq), id: r.object_id, kind: r.kind, device: r.device_id, at: r.created_at };
       if (r.data) rec.data = Buffer.from(r.data).toString('base64url');
-      return rec;
-    });
+      records.push(rec);
+    }
     return { records, head };
   }
 

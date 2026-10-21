@@ -50,6 +50,9 @@ export async function exists(file: string): Promise<boolean> {
 }
 
 export interface LockHandle {
+  /** Heartbeat: long-running holders call this so others do not take the lock as stale. */
+  refresh(): Promise<void>;
+  /** Removes the lock only if it is still ours (it may have been taken over as stale). */
   release(): Promise<void>;
 }
 
@@ -65,7 +68,7 @@ function pidAlive(pid: number): boolean {
 async function isStale(dir: string, staleMs: number): Promise<boolean> {
   try {
     const st = await fs.stat(dir);
-    if (Date.now() - st.mtimeMs > staleMs) return true;
+    if (Date.now() - st.mtimeMs > staleMs) return true; // no heartbeat for staleMs: owner hung or gone
     try {
       const owner = JSON.parse(await fs.readFile(path.join(dir, 'owner.json'), 'utf8')) as { pid: number; host: string };
       return owner.host === os.hostname() && !pidAlive(owner.pid);
@@ -91,8 +94,19 @@ export async function tryLock(dir: string, staleMs = 120_000): Promise<LockHandl
       }
       return null;
     }
-    await fs.writeFile(path.join(dir, 'owner.json'), JSON.stringify({ pid: process.pid, host: os.hostname(), at: new Date().toISOString() }));
-    return { release: () => fs.rm(dir, { recursive: true, force: true }) };
+    const token = randomBytes(8).toString('hex');
+    const ownerFile = path.join(dir, 'owner.json');
+    await fs.writeFile(ownerFile, JSON.stringify({ pid: process.pid, host: os.hostname(), token, at: new Date().toISOString() }));
+    return {
+      refresh: async () => {
+        const t = new Date();
+        await fs.utimes(dir, t, t).catch(() => {});
+      },
+      release: async () => {
+        const owner = await readJson<{ token?: string } | null>(ownerFile, null).catch(() => null);
+        if (owner?.token === token) await fs.rm(dir, { recursive: true, force: true });
+      },
+    };
   }
   return null;
 }

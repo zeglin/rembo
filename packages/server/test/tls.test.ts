@@ -2,6 +2,7 @@ import { X509Certificate } from 'node:crypto';
 import { promises as fs } from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
+import tls from 'node:tls';
 import { afterAll, beforeAll, describe, expect, test } from 'vitest';
 import { HubClient, spkiPin } from '../../core/src/http.ts';
 import { startHub, tlsPaths, type RunningHub } from '../src/hub.ts';
@@ -23,6 +24,8 @@ describe('TLS with a pinned key', () => {
   let dir: string;
   let hub: RunningHub;
   let pin: string;
+  // Antivirus HTTPS scanning (seen with Avast Web Shield) re-signs even loopback TLS; pinning must then refuse.
+  let interceptedBy = '';
 
   beforeAll(async () => {
     dir = await fs.mkdtemp(path.join(os.tmpdir(), 'rembo-tls-'));
@@ -33,6 +36,14 @@ describe('TLS with a pinned key', () => {
     await fs.writeFile(p.key, keyPem);
     pin = spkiPin(new X509Certificate(certPem).raw);
     hub = await startHub({ dataDir: dir, port: 0, tls: true });
+    interceptedBy = await new Promise<string>((resolve) => {
+      const socket = tls.connect({ host: '127.0.0.1', port: Number(new URL(hub.url).port), rejectUnauthorized: false }, () => {
+        const peer = socket.getPeerCertificate();
+        socket.destroy();
+        resolve(peer.raw && spkiPin(peer.raw) !== pin ? String(peer.issuer?.O ?? peer.issuer?.CN ?? 'unknown') : '');
+      });
+      socket.on('error', () => resolve(''));
+    });
   });
 
   afterAll(async () => {
@@ -40,7 +51,13 @@ describe('TLS with a pinned key', () => {
     await fs.rm(dir, { recursive: true, force: true });
   });
 
-  test('connects when the pin matches, learning the certificate once', async () => {
+  test('connects when the pin matches, learning the certificate once', async (ctx) => {
+    if (interceptedBy) {
+      // Cannot test a direct connection here; check that the interception is named instead.
+      const client = new HubClient({ url: hub.url, certPin: pin });
+      await expect(client.request('GET', '/health')).rejects.toMatchObject({ code: 'tls_intercepted' });
+      ctx.skip(`TLS to localhost is intercepted by "${interceptedBy}"`);
+    }
     let learned = '';
     const client = new HubClient({ url: hub.url, certPin: pin });
     client.onCertLearned = async (pem) => {
@@ -54,18 +71,18 @@ describe('TLS with a pinned key', () => {
 
   test('refuses a different key', async () => {
     const client = new HubClient({ url: hub.url, certPin: Buffer.alloc(32, 1).toString('base64url') });
-    await expect(client.request('GET', '/health')).rejects.toMatchObject({ code: 'pin_mismatch' });
+    await expect(client.request('GET', '/health')).rejects.toMatchObject({ code: expect.stringMatching(/pin_mismatch|tls_intercepted/) });
   });
 
   test('refuses a stored certificate whose key does not match the pin', async () => {
     const other = createSelfSignedCert({ ips: ['127.0.0.1'] }).certPem;
     const client = new HubClient({ url: hub.url, certPin: spkiPin(new X509Certificate(other).raw), certPem: other });
-    await expect(client.request('GET', '/health')).rejects.toMatchObject({ code: expect.stringMatching(/pin_mismatch|unreachable/) });
+    await expect(client.request('GET', '/health')).rejects.toMatchObject({ code: expect.stringMatching(/pin_mismatch|tls_intercepted|unreachable/) });
   });
 
   test('without a pin the self-signed hub is not trusted (WebPKI mode)', async () => {
     const client = new HubClient({ url: hub.url });
-    await expect(client.request('GET', '/health')).rejects.toBeTruthy();
+    await expect(client.request('GET', '/health')).rejects.toMatchObject({ code: 'tls_untrusted' });
   });
 
   test('plain HTTP is refused for non-local hubs', async () => {

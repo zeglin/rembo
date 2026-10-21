@@ -4,8 +4,8 @@ import https from 'node:https';
 import net from 'node:net';
 import tls from 'node:tls';
 import { sha256 } from './crypto.ts';
-import { RemboError } from './errors.ts';
-import { HEADER_PROTOCOL, PROTOCOL_VERSION, type ApiErrorBody } from './protocol.ts';
+import { RemboError, untrusted } from './errors.ts';
+import { HEADER_PROTOCOL, LIMITS, PROTOCOL_VERSION, type ApiErrorBody } from './protocol.ts';
 
 export class HubError extends RemboError {
   readonly status: number;
@@ -42,6 +42,20 @@ function pinMismatch(): HubError {
   );
 }
 
+const INTERCEPT_HINT =
+  'This is usually antivirus HTTPS scanning (e.g. a "Web Shield") or a company proxy. Add an exception for the hub address there; rembo will not send data through it.';
+
+function intercepted(by: string): HubError {
+  return new HubError(0, 'tls_intercepted', `The connection to the hub is being intercepted (certificate issued by "${untrusted(by, 80)}").`, INTERCEPT_HINT);
+}
+
+/** An issuer different from the subject means the hub's self-signed certificate was re-signed on the way. */
+function interceptor(cert: tls.PeerCertificate): string | undefined {
+  const name = (n: tls.Certificate | undefined) => JSON.stringify(n ?? {});
+  if (!cert.issuer || name(cert.issuer) === name(cert.subject)) return undefined;
+  return [cert.issuer.O, cert.issuer.CN].flat().find(Boolean) ?? 'unknown issuer';
+}
+
 /**
  * IP-mode first contact: fetch the hub certificate and accept it only if its
  * public key matches the pin from the account key. No application data is
@@ -62,7 +76,10 @@ export function probeCertificate(url: URL, expectedPin: string, timeoutMs: numbe
         const cert = socket.getPeerCertificate();
         socket.destroy();
         if (!cert?.raw) return reject(new HubError(0, 'tls_error', 'The hub did not present a TLS certificate.'));
-        if (spkiPin(cert.raw) !== expectedPin) return reject(pinMismatch());
+        if (spkiPin(cert.raw) !== expectedPin) {
+          const by = interceptor(cert);
+          return reject(by ? intercepted(by) : pinMismatch());
+        }
         resolve(new X509Certificate(cert.raw).toString());
       },
     );
@@ -136,13 +153,15 @@ export class HubClient {
     } catch (e) {
       // A re-issued certificate with the same pinned key: learn it again once.
       const code = (e as NodeJS.ErrnoException).code ?? '';
-      if (this.endpoint.certPin && this.endpoint.certPem && /CERT|SELF_SIGNED|LEAF/.test(code)) {
+      if (!/CERT|SELF_SIGNED|LEAF|ISSUER/.test(code)) throw e;
+      if (this.endpoint.certPin && this.endpoint.certPem) {
         this.endpoint.certPem = undefined;
         this.agent?.destroy();
         this.agent = undefined;
         return this.send<T>(method, apiPath, body, opts);
       }
-      throw e;
+      // Domain mode: the certificate does not chain to a public CA.
+      throw new HubError(0, 'tls_untrusted', `The hub's TLS certificate is not trusted (${code}).`, INTERCEPT_HINT);
     }
   }
 
@@ -161,7 +180,15 @@ export class HubClient {
     return new Promise<T>((resolve, reject) => {
       const req = lib.request(url, { method, headers, agent, timeout: opts.timeoutMs ?? this.timeoutMs }, (res) => {
         const chunks: Buffer[] = [];
-        res.on('data', (c: Buffer) => chunks.push(c));
+        let size = 0;
+        res.on('data', (c: Buffer) => {
+          size += c.length;
+          if (size > LIMITS.responseBytes) {
+            req.destroy();
+            return reject(new HubError(0, 'bad_hub_response', 'The hub sent an oversized response.'));
+          }
+          chunks.push(c);
+        });
         res.on('error', (e) => reject(this.unreachable(e)));
         res.on('end', () => {
           const text = Buffer.concat(chunks).toString('utf8');
@@ -174,10 +201,11 @@ export class HubClient {
           const status = res.statusCode ?? 0;
           if (status >= 400) {
             const err = (json ?? {}) as Partial<ApiErrorBody>;
-            if (status === 426) {
-              return reject(new HubError(426, 'client_too_old', err.message ?? 'This hub needs a newer rembo.', 'Run: rembo update'));
-            }
-            return reject(new HubError(status, err.error ?? `http_${status}`, err.message ?? `The hub answered HTTP ${status}.`));
+            // Error text comes from the hub: printed to terminals and, later, shown to models.
+            const message = err.message ? untrusted(err.message) : `The hub answered HTTP ${status}.`;
+            const code = typeof err.error === 'string' && /^[a-z0-9_]{1,40}$/.test(err.error) ? err.error : `http_${status}`;
+            if (status === 426) return reject(new HubError(426, 'client_too_old', message, 'Run: rembo update'));
+            return reject(new HubError(status, code, message));
           }
           resolve(json as T);
         });
@@ -185,7 +213,7 @@ export class HubClient {
       req.on('timeout', () => req.destroy(Object.assign(new Error('timeout'), { code: 'ETIMEDOUT' })));
       req.on('error', (e) => {
         const code = (e as NodeJS.ErrnoException).code ?? '';
-        if (/CERT|SELF_SIGNED|LEAF/.test(code)) return reject(e); // handled by request()
+        if (/CERT|SELF_SIGNED|LEAF|ISSUER/.test(code)) return reject(e); // handled by request()
         reject(this.unreachable(e));
       });
       req.end(payload);

@@ -13,6 +13,10 @@ export const LIMITS = {
   requestBytes: 16 << 20,
   batchItems: 500,
   changesPage: 500,
+  /** Ciphertext bytes per changes page (the hub still returns at least one record). */
+  changesPageBytes: 8 << 20,
+  /** Largest hub response a client accepts. */
+  responseBytes: 64 << 20,
 } as const;
 
 export const OBJECT_ID_RE = /^[A-Za-z0-9_-]{16,64}$/;
