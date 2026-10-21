@@ -153,7 +153,10 @@ Etap 2 audit (fixed):
   owner-only and only the last 10 are kept.
 - Plugin install builds the new copy in a staging folder and swaps it in,
   so an interrupted install never leaves a half plugin.
-- The snapshot fence also catches `< / rembo-memory` spelled with spaces.
+- Snapshot fence (after an automated security review): invisible and
+  format characters (zero-width, soft hyphen, BOM, bidi, separators) are
+  removed and every `<` in entry text becomes `‹`, so no spelling of the
+  closing tag survives; `untrusted()` uses the same character set.
 - `rembo doctor` checks that the Node.js path rendered into the plugin
   still exists (nvm/Volta upgrades would break hooks silently).
 - Literal bidi / control characters had slipped into two source files

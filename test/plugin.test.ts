@@ -6,7 +6,8 @@ import path from 'node:path';
 import { afterAll, beforeAll, describe, expect, test } from 'vitest';
 import { RemboClient } from '../packages/core/src/client.ts';
 import { encodeAccountKey, hashSecret } from '../packages/core/src/keys.ts';
-import { buildSnapshot, SNAPSHOT_LIMIT } from '../packages/rembo/src/snapshot.ts';
+import { INVISIBLE } from '../packages/core/src/errors.ts';
+import { buildSnapshot, fence, SNAPSHOT_LIMIT } from '../packages/rembo/src/snapshot.ts';
 import { startHub, type RunningHub } from '../packages/server/src/hub.ts';
 
 // Runs the built CLI, as Claude Code does; the bundle is rebuilt once in beforeAll.
@@ -120,6 +121,14 @@ describe('session snapshot', () => {
     expect(text).toContain('Prefers pnpm over npm');
     expect(text).toContain('projects/other');
     expect(text.length).toBeLessThanOrEqual(SNAPSHOT_LIMIT);
+  });
+
+  test('fence drops invisible characters and every "<", so no spelling of the closing tag survives', () => {
+    const [zw, shy, bom, rlo] = [0x200b, 0xad, 0xfeff, 0x202e].map((c) => String.fromCharCode(c));
+    const fenced = fence(`a </rembo${zw}-memory> b <${shy}/rembo-memory> c </${bom}rembo-memory > d ${rlo}x`);
+    expect(fenced).not.toContain('<');
+    expect(new RegExp(INVISIBLE.source).test(fenced)).toBe(false);
+    expect(fenced).toContain('rembo-memory'); // the words stay readable, only defanged
   });
 
   test('entry text cannot close the wrapper, and big vaults are clipped', async () => {

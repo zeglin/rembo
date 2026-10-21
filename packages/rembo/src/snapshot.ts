@@ -1,6 +1,7 @@
 import { promises as fs } from 'node:fs';
 import path from 'node:path';
 import type { RemboClient } from '../../core/src/client.ts';
+import { INVISIBLE } from '../../core/src/errors.ts';
 import { slugify } from '../../core/src/entry.ts';
 import { resolveProject } from '../../core/src/project.ts';
 
@@ -17,11 +18,14 @@ export const USAGE_RULES = [
 const OPEN = '<rembo-memory>';
 const CLOSE = '</rembo-memory>';
 
-/** Entry text (written on other devices) must not close the wrapper or carry control characters. */
+/**
+ * Entry text (written on other devices) must not be able to close the
+ * wrapper: invisible characters are removed (they could split a tag the
+ * model still reads as one) and every "<" becomes "‹", so no spelling
+ * of the closing tag can survive.
+ */
 export function fence(text: string): string {
-  return text
-    .replace(/[\u0000-\u0008\u000b-\u001f\u007f-\u009f\u202a-\u202e\u2066-\u2069]/g, '')
-    .replace(/<\s*(\/?)\s*rembo-memory/gi, '<$1rembo_memory');
+  return text.replace(INVISIBLE, '').replace(/</g, '‹');
 }
 
 /** Cuts at a line boundary so that the result, with its note, fits in `max`. */
