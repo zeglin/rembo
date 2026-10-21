@@ -56,6 +56,9 @@ export class LocalVault {
   get failedDir(): string {
     return path.join(this.dir, 'failed');
   }
+  private get viewsStampFile(): string {
+    return path.join(this.dir, 'views.stamp');
+  }
   private get viewsDirtyFile(): string {
     return path.join(this.dir, 'views.dirty');
   }
@@ -242,5 +245,11 @@ export class LocalVault {
         if (!views.has(`${dir}/${name}`)) await fs.rm(path.join(this.mdDir, dir, name), { force: true });
       }
     }
+    await atomicWrite(this.viewsStampFile, randomBytes(8).toString('hex'));
+  }
+
+  /** Changes whenever the views are regenerated, i.e. whenever local entries changed (any process). */
+  async viewsStamp(): Promise<string> {
+    return fs.readFile(this.viewsStampFile, 'utf8').catch(() => '');
   }
 }

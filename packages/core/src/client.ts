@@ -600,6 +600,12 @@ export class RemboClient {
     await this.hub.request('DELETE', `/v1/devices/${encodeURIComponent(id)}`);
   }
 
+  /** Default for new sessions: off means no snapshot and no rembo tools unless /rembo on or REMBO=on. */
+  async setDefaultMode(mode: 'on' | 'off'): Promise<void> {
+    this.config.defaults.mode = mode;
+    await this.saveConfig();
+  }
+
   async setHubUrl(url: string): Promise<void> {
     const parsed = new URL(url);
     if (parsed.protocol !== 'https:' && parsed.protocol !== 'http:') throw new RemboError('bad_url', 'The hub URL must start with https://');

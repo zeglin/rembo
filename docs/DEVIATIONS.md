@@ -27,3 +27,6 @@ Changes forced by research or chosen in the first-principles review
 | 20 | install from `/plugin` + userConfig | deferred to Etap 6 | secret storage undocumented; recovery key must not enter the transcript | 0001 |
 | 21 | no network admin API + `rembo device list|revoke` | devices may manage their own account's devices; admin stays CLI-only | cloud users need self-service revocation | 0002 |
 | 22 | discovery of all past sessions | ~30 days of transcripts exist by default | `cleanupPeriodDays` = 30 | ARCHITECTURE |
+| 23 | mod disables itself outside the exact tested version range | active for 2.1.287 <= version < 2.2.0; any error in the module disables it | Claude Code ships several releases a week; an exact range would turn `/rembo` off after every update | 0007 |
+| 24 | per-session off enforced for all rembo tools | the MCP server enforces only `REMBO=off`; the default `rembo off` and `/rembo off` are enforced by the hook (no snapshot) and the mod (tool calls denied) | the MCP server has no session id; enforcing the default there would make `/rembo on` impossible | 0007 |
+| 25 | `rembo update` = `npx rembo@latest setup --upgrade` | until rembo is on npm, `rembo update` reinstalls the plugin from the running package | nothing published yet | 0001 |

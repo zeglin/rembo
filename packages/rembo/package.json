@@ -6,7 +6,7 @@
   "bin": {
     "rembo": "bin/rembo.js"
   },
-  "files": ["bin", "dist"],
+  "files": ["bin", "dist", "plugin", "!plugin/**/*.test.ts"],
   "engines": {
     "node": ">=22.12"
   },

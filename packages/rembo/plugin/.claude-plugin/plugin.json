@@ -1,0 +1,10 @@
+{
+  "name": "rembo",
+  "version": "0.1.0",
+  "description": "Shared, end-to-end encrypted memory for every Claude Code session on every machine you use",
+  "author": { "name": "Wojciech Żeglin", "email": "hello@rembo.dev" },
+  "homepage": "https://rembo.dev",
+  "repository": "https://github.com/zeglin/rembo",
+  "license": "MIT",
+  "keywords": ["memory", "sync", "encryption", "mcp"]
+}

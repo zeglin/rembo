@@ -43,7 +43,7 @@ machine, not documented.
 | Context size limit | confirmed | stdout / `additionalContext` capped at **10,000 characters**; overflow saved to a file, model gets path + 2,000-char preview; same for UserPromptSubmit | snapshot budget 8,000 chars hard cap |
 | Timeouts | confirmed | command hooks default 600 s; UserPromptSubmit 30 s; **SessionEnd shared 1.5 s budget**; failing hooks don't break the session; exit 2 blocks only where blocking applies | SessionEnd only spawns a detached sync |
 | Windows shell | confirmed | `shell: "bash"` (Git Bash) or `"powershell"`; PowerShell when Git Bash is absent. **Exec form** `"command": "node", "args": ["${CLAUDE_PLUGIN_ROOT}/dist/hook.js"]` runs without a shell; `command` must be a real .exe | exec form + absolute Node path (ADR-0001) |
-| Background work | confirmed / uncertain | `"async": true` runs a command hook in the background; whether a hook's detached child keeps it alive is uncertain -> experiment: spawn `detached`, `stdio: 'ignore'`, `unref()`, time the return on Windows | Etap 2 measurement |
+| Background work | confirmed *(local, Windows, 2.1.306)* | a child spawned `detached`, `stdio: 'ignore'`, `unref()` from a hook or from the MCP server starts, outlives the hook and `claude` itself, and finishes; the hook returns at once | SessionStart/SessionEnd spawn `rembo sync` (cwd = `~/.rembo`, so no project folder stays busy) |
 | Hook types | confirmed | command, http, mcp_tool, prompt, agent | — |
 | Session id for MCP servers | **wrong** | no documented `CLAUDE_SESSION_ID`; mods have `$.session.id()` | per-session mode enforced by a PreToolUse hook (ADR-0007) |
 
@@ -94,7 +94,7 @@ machine, not documented.
 
 | claim | verdict | facts | consequence |
 | --- | --- | --- | --- |
-| `CLAUDE_CONFIG_DIR` | confirmed | "all settings, session history, and plugins are stored under this path"; whether `~/.claude.json` relocates is **uncertain** (experiment in Etap 2) | e2e tests run with a temp `CLAUDE_CONFIG_DIR` + `HOME`/`USERPROFILE` override |
+| `CLAUDE_CONFIG_DIR` | confirmed *(local, 2.1.306)* | "all settings, session history, and plugins are stored under this path"; `.claude.json` is created inside it too; with it set (plus `USERPROFILE`/`HOME`), the real `~/.claude.json` and `~/.claude/` stay byte-identical (hashed before/after) | e2e tests run with a temp `CLAUDE_CONFIG_DIR` + `HOME`/`USERPROFILE` override |
 | Session-only plugin loading | confirmed | `claude --plugin-dir <dir>`, `CLAUDE_CODE_PLUGIN_DIRS`; `claude plugin validate --strict`; `claude plugin test <dir>` for mods | CI checks |
 
 ## j) Local data to scan
@@ -154,3 +154,16 @@ custom minimal scheme with RFC 9421 semantics (ADR-0002, ADR-0003).
   2026-10-20; 26 Active LTS from 2026-10-28 (github.com/nodejs/Release).
 - `node:sqlite`: no flag since 22.13; Release Candidate in 24.15+; WAL via
   pragma; fixes for a TEXT truncation bug in 24.16 / 26.1.
+
+## n) Etap 2 experiments (Claude Code 2.1.306, Windows, isolated profile)
+
+| finding | consequence |
+| --- | --- |
+| Without credentials, `claude -p` still loads plugins, starts MCP servers, runs SessionStart and SessionEnd hooks and the module's `session.start`, then prints "Not logged in" | full e2e without spending anything (`test/claude-e2e.test.ts`) |
+| Classic hooks and `modules` in one `hooks/hooks.json` validate and load together | one hooks file |
+| The client first sends `server/discover` (protocol "2026-07-28" in `_meta`); with "Method not found" it falls back to `initialize` (2025-11-25) about 1.9 s later; the delay is the client's and does not block the session (MCP connects in the background) | the server answers -32601 and implements `initialize`; a short `-p` run may end before MCP is connected |
+| A stdio server that crashed at start was recorded in `mcp-needs-auth-cache.json` and skipped by later sessions | the MCP server must never crash at start: it opens the vault lazily and answers "not set up" from tools |
+| Directory-marketplace plugins load in place (`readFromFolder`); `plugin install` of an installed plugin is a no-op; `plugin update` picks up a new `version` | setup: marketplace add/update, install, update when the version differs |
+| `claude plugin validate` wants README.md and a license for the directory profile; `claude plugin test` runs `*.test.ts` against the engine | plugin ships README and LICENSE; module tests in `plugin/hooks/mod.test.ts` |
+| The module loader checks statically that `$` is only used as `$.noun.call()` or passed to top-level functions of the file | helpers are top-level functions taking `$` and an explicit state |
+| SessionStart hook (bundled CLI, 1000 entries): 136 ms median, of which 42 ms is Node start | within the 300 ms budget |

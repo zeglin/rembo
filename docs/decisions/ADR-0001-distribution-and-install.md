@@ -64,6 +64,16 @@ the CLI version, and the plugin files cannot be rendered per machine. Why not
 reference the global npm folder in place: `npx` caches are ephemeral and a
 global install is optional.
 
+**As built (Etap 2).** The app folder is the plugin itself and its parent is
+the marketplace: `~/.rembo/app/.claude-plugin/marketplace.json` lists
+`{ "name": "rembo", "source": "./<version>" }`, and `~/.rembo/app/<version>/`
+holds `.claude-plugin/plugin.json`, `cli.js` (the bundle), `hooks/hooks.json`
+and `.mcp.json` (rendered: absolute `process.execPath`, `--home <rembo home>`),
+`hooks/mod.ts`, `app.json` (node path and home for the module), README and
+LICENSE. Setup runs `claude plugin marketplace add|update`, `plugin install`,
+`plugin update` when the version differs, verifies with `plugin list --json`,
+and keeps the current and the previous version folder.
+
 **Updates.** `rembo update` = run `npx rembo@latest setup --upgrade`
 semantics: the newer package copies itself to `~/.rembo/app/<new>/`, rewrites
 the marketplace entry, runs `claude plugin marketplace update rembo` and

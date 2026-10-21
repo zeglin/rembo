@@ -23,5 +23,9 @@
   (no enums, no parameter properties), so Node runs sources directly:
   `node packages/rembo/src/cli.ts --help`.
 - Layout: `packages/core` (shared logic), `packages/server` (`rembo-server`),
-  `packages/rembo` (`rembo` CLI, later the plugin). Integration tests in
-  `test/`.
+  `packages/rembo` (`rembo` CLI; `plugin/` is the Claude Code plugin source).
+  Integration tests in `test/`.
+- Module tests: `claude plugin test packages/rembo/plugin`. `test/claude-e2e.test.ts`
+  runs a real `claude` in a throw-away profile (skipped without `claude`,
+  or with `REMBO_E2E=0`); always isolate with `CLAUDE_CONFIG_DIR` plus
+  `USERPROFILE`/`HOME` when running `claude` by hand.

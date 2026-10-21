@@ -32,6 +32,13 @@ session-interactive. No status line wrapper, no PreToolUse fallback.
   against the range it was tested with; outside it, the mod disables itself
   and logs one line. The core keeps working.
 
+**As built (Etap 2).** The module is active for 2.1.287 <= version < 2.2.0
+(any error during its start disables it for the session). Who enforces what:
+`REMBO=off` at launch — hook (no snapshot), MCP server (tools refuse) and
+module; `rembo off` (default for new sessions) — hook and module, so
+`/rembo on` can still turn a session on; `/rembo off` — module only (tool
+calls denied). `/rembo on` returns the snapshot as `context`.
+
 **Without the mod** (Claude Code < 2.1.287, `claude -p`, `disableAllHooks`,
 policy): memory still works (SessionStart hook + MCP). Per-session control is
 `REMBO=off claude` at launch; `rembo off` sets the global default. `rembo

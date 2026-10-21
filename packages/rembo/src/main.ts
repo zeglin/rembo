@@ -11,6 +11,10 @@ import { HubClient } from '../../core/src/http.ts';
 import { resolveProject } from '../../core/src/project.ts';
 import { PROTOCOL_MAX, PROTOCOL_MIN, PROTOCOL_VERSION, type HealthResponse } from '../../core/src/protocol.ts';
 import { liveEntries } from '../../core/src/views.ts';
+import { log, runHook } from './hook.ts';
+import { claudeConfigDir, findClaude, installedAppVersion, installPlugin, PLUGIN_ID, runClaude, uninstallPlugin } from './install.ts';
+import { McpServer } from './mcp.ts';
+import { buildSnapshot } from './snapshot.ts';
 
 const HELP = `rembo ${CLIENT_VERSION} — shared, end-to-end encrypted memory for Claude Code
 
@@ -23,6 +27,7 @@ Setup
     --name <name>              Device name (default: hostname)
     --hub <url>                Override the hub address stored in the key
     --no-encryption            Self-hosted only: store memory unencrypted (not recommended)
+    --no-plugin                Do not install the Claude Code plugin
 
 Memory
   remember <title> [--body <text> | --body-file <file|->] [--summary <s>]
@@ -36,11 +41,18 @@ Memory
 Sync and status
   sync [--retry-failed] | status | doctor
 
+Claude Code
+  install | update             Install or update the Claude Code plugin
+  uninstall [--purge --yes]    Remove the plugin (--purge also deletes ~/.rembo)
+  on | off                     Default for new sessions (one session: /rembo on|off)
+  snapshot [--cwd <dir>]       Print the memory a session starts with
+
 Devices and hub
   device list | device revoke <id>
   hub set-url <url>
 
-Global options: --json, --home <dir> (default: $REMBO_HOME or ~/.rembo), --version, --help`;
+Global options: --json, --home <dir> (default: $REMBO_HOME or ~/.rembo),
+  --claude-config <dir> (default: $CLAUDE_CONFIG_DIR or ~/.claude), --version, --help`;
 
 export interface Io {
   out(text: string): void;
@@ -100,6 +112,11 @@ export async function main(argv: string[], io: Io = processIo()): Promise<number
       supersedes: { type: 'string', multiple: true },
       limit: { type: 'string' },
       only: { type: 'boolean' },
+      'no-plugin': { type: 'boolean' },
+      'claude-config': { type: 'string' },
+      cwd: { type: 'string' },
+      purge: { type: 'boolean' },
+      yes: { type: 'boolean' },
       'retry-failed': { type: 'boolean' },
       help: { type: 'boolean', short: 'h' },
       version: { type: 'boolean', short: 'v' },
@@ -120,6 +137,14 @@ export async function main(argv: string[], io: Io = processIo()): Promise<number
   }
 
   const open = () => RemboClient.open(home);
+  const env: NodeJS.ProcessEnv = values['claude-config'] ? { ...process.env, CLAUDE_CONFIG_DIR: path.resolve(values['claude-config']) } : process.env;
+  const install = async () => {
+    try {
+      return await installPlugin(home, env);
+    } catch (e) {
+      return { ok: false, message: `Claude Code plugin not installed: ${(e as Error).message}` };
+    }
+  };
   const syncAfterChange = async (client: RemboClient): Promise<{ sync?: SyncResult; note: string }> => {
     try {
       const sync = await client.sync();
@@ -189,13 +214,15 @@ export async function main(argv: string[], io: Io = processIo()): Promise<number
       } finally {
         client.close();
       }
+      const plugin = values['no-plugin'] ? undefined : await install();
       if (json) {
-        print('', { createdVault: result.createdVault, vaultPending: result.vaultPending, recoveryKey: result.recoveryKey, vault: client.config.vault.id, sync, syncError });
+        print('', { createdVault: result.createdVault, vaultPending: result.vaultPending, recoveryKey: result.recoveryKey, vault: client.config.vault.id, sync, syncError, plugin });
         return 0;
       }
       if (!result.createdVault && sync) io.out(`✓ Vault unlocked; ${sync.pulled} entries downloaded`);
       if (syncError || (sync && sync.status !== 'ok')) io.out(`! First sync did not finish (${syncError ?? sync?.error ?? sync?.status}); run rembo sync later.`);
-      io.out('✓ Ready. Try: rembo remember "Something worth remembering"   then   rembo search something');
+      if (plugin) io.out(`${plugin.ok ? '✓' : '!'} ${plugin.message}`);
+      io.out('✓ Ready. Start a new Claude Code session, or try: rembo remember "Something worth remembering"');
       return 0;
     }
 
@@ -323,7 +350,60 @@ export async function main(argv: string[], io: Io = processIo()): Promise<number
     }
 
     case 'doctor':
-      return doctor(home, io, json);
+      return doctor(home, io, json, env);
+
+    case 'install':
+    case 'update': {
+      const before = await installedAppVersion(home);
+      await open(); // must be set up first
+      const r = await install();
+      const note = cmd === 'update' && before === CLIENT_VERSION ? ' (already this version; newer releases: npm i -g rembo@latest, then rembo update)' : '';
+      print(`${r.ok ? '✓' : '✗'} ${r.message}${note}`, { ...r, previous: before });
+      return r.ok ? 0 : 1;
+    }
+
+    case 'uninstall': {
+      const r = await uninstallPlugin(home, env);
+      if (values.purge) {
+        if (!values.yes) throw new UsageError('--purge deletes the local memory copy and keys in ' + home + '; repeat with --yes to confirm.');
+        await RemboClient.removeLocal(home);
+      }
+      print(`${r.ok ? '✓' : '!'} ${r.message}${values.purge ? ` Deleted ${home}.` : ` Your memory stays in ${home} and on the hub.`}`, r);
+      return r.ok ? 0 : 1;
+    }
+
+    case 'on':
+    case 'off': {
+      const client = await open();
+      await client.setDefaultMode(cmd);
+      client.close();
+      print(`✓ rembo is ${cmd} by default in new Claude Code sessions.${cmd === 'off' ? ' Turn it on for one session with /rembo on or REMBO=on.' : ''}`, { mode: cmd });
+      return 0;
+    }
+
+    case 'snapshot': {
+      const client = await open();
+      const text = await buildSnapshot(client, path.resolve(values.cwd ?? io.cwd));
+      client.close();
+      print(text, { snapshot: text });
+      return 0;
+    }
+
+    case 'hook': {
+      // Called by Claude Code; always exits 0 and prints only the hook answer.
+      const stdin = await Promise.race([io.readStdin?.() ?? Promise.resolve(''), new Promise<string>((r) => setTimeout(() => r(''), 2000).unref())]);
+      const answer = await runHook(rest[0] ?? '', stdin, { home, cliPath: process.argv[1] ?? '', env: process.env }).catch(async (e: unknown) => {
+        await log(home, `hook: ${(e as Error).stack ?? String(e)}`);
+        return '';
+      });
+      if (answer) io.out(answer);
+      return 0;
+    }
+
+    case 'mcp': {
+      await new McpServer({ home, cwd: io.cwd, env: process.env, output: process.stdout }).serve(process.stdin);
+      return 0;
+    }
 
     case 'device': {
       const client = await open();
@@ -356,7 +436,7 @@ export async function main(argv: string[], io: Io = processIo()): Promise<number
   throw new UsageError(`Unknown command "${cmd}". Run rembo --help.`);
 }
 
-async function doctor(home: string, io: Io, json: boolean): Promise<number> {
+async function doctor(home: string, io: Io, json: boolean, env: NodeJS.ProcessEnv): Promise<number> {
   const checks: { name: string; ok: boolean; detail: string; hint?: string }[] = [];
   const add = (name: string, ok: boolean, detail: string, hint?: string) => checks.push(hint ? { name, ok, detail, hint } : { name, ok, detail });
   add('node', nodeOk(), process.versions.node, 'Install Node.js 22.12 or newer from https://nodejs.org');
@@ -400,6 +480,14 @@ async function doctor(home: string, io: Io, json: boolean): Promise<number> {
       add('local', false, (e as Error).message, `Check permissions of ${home}`);
     }
     client.close();
+    const claude = findClaude(env);
+    if (!claude) add('plugin', false, 'Claude Code ("claude") not found', 'Install Claude Code, then run: rembo install');
+    else {
+      const listed = await runClaude(claude, ['plugin', 'list', '--json'], env);
+      const row = (JSON.parse(listed.stdout.slice(Math.max(0, listed.stdout.indexOf('['))) || '[]') as { id: string; version?: string; enabled?: boolean }[]).find((p) => p.id === PLUGIN_ID);
+      const okPlugin = Boolean(row && row.enabled !== false && row.version === CLIENT_VERSION);
+      add('plugin', okPlugin, row ? `${PLUGIN_ID} ${row.version}${row.enabled === false ? ' (disabled)' : ''} in ${claudeConfigDir(env)}` : `not installed in ${claudeConfigDir(env)}`, 'Run: rembo install');
+    }
   }
   if (json) io.out(JSON.stringify({ checks }, null, 2));
   else for (const c of checks) io.out(`${c.ok ? '✓' : '✗'} ${c.name.padEnd(6)} ${c.detail}${!c.ok && c.hint ? `\n         → ${c.hint}` : ''}`);

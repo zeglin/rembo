@@ -99,20 +99,65 @@ Audit fixes (`test/robustness.test.ts`, 59 tests + 1 environment skip):
 `rembo update` is referenced by hints (426, deferred entries) and must exist
 in Etap 2.
 
-## Next: Etap 2 — Claude Code plugin + one-command install
+## 2026-10-21 — Etap 2 (Claude Code plugin + one-command install) — done
 
-1. Plugin folder in `packages/rembo/plugin/`: manifest, `hooks/hooks.json`
-   (SessionStart: snapshot ≤ 8000 chars + detached sync; SessionEnd: detached
-   sync), `.mcp.json` (stdio server: search, read, list, remember, forget,
-   with `instructions`), mod module (`/rembo`, `$.ui.status`, toasts, off
-   enforcement, version guard).
-2. `rembo setup` installs the app into `~/.rembo/app/<ver>`, renders hooks
-   and MCP config with the absolute Node path, registers the local
-   marketplace and installs the plugin (user scope); `rembo uninstall`,
-   `rembo update`.
-3. Experiments first: detached child from a hook on Windows; classic hooks +
-   `modules` in one hooks.json; MCP `instructions` size limit; whether
-   `CLAUDE_CONFIG_DIR` relocates `~/.claude.json`.
-4. e2e with an isolated `CLAUDE_CONFIG_DIR` (`claude -p`), timing budgets.
+Built (`packages/rembo`):
+- `src/snapshot.ts`: the session snapshot from the local views (project
+  page, this machine's page, preferences, index) in a `<rembo-memory>`
+  wrapper marked as data, hard cap 8000 characters, entry text fenced so it
+  cannot close the wrapper.
+- `src/hook.ts` + `rembo hook session-start|session-end`: exec-form hooks;
+  SessionStart prints the snapshot as `additionalContext` and starts a
+  detached `rembo sync`; SessionEnd starts a sync; silent when off or not
+  set up; errors go to `~/.rembo/logs/rembo.log`, exit code always 0.
+- `src/mcp.ts` + `rembo mcp`: dependency-free MCP stdio server (JSON-RPC,
+  protocol 2024-11-05 … 2025-11-25) with `search`, `read`, `list`,
+  `remember`, `forget`; instructions with the usage rules (other clients
+  also get the index); in-memory index reloaded when `views.stamp` changes;
+  quick pull (≤ 1.5 s) before reads when the last one is older than 30 s,
+  pull every 60 s, push after writes; never crashes at start.
+- `plugin/`: manifest, README, `hooks/mod.ts` (`/rembo on|off|status|sync|
+  search|forget` without a model turn, "Rembo Mode On · ✓/↑n/offline" status
+  line, toast after remember, per-session off by denying rembo tool calls,
+  version guard) and `hooks/mod.test.ts` (5 tests, `claude plugin test`).
+- `src/install.ts` + `rembo install|update|uninstall [--purge --yes]`,
+  `rembo on|off`, `rembo snapshot`, `--claude-config`, `--no-plugin`;
+  `rembo setup` installs the plugin after the first sync; `rembo doctor`
+  checks the plugin. Settings are changed only through `claude plugin …`,
+  with a backup of `settings.json` in `~/.rembo/backup/` first.
+
+DoD evidence (`npm test`: 68 tests + 1 environment skip; `claude plugin
+test packages/rembo/plugin`: 5 tests):
+- `test/claude-e2e.test.ts` with an isolated `CLAUDE_CONFIG_DIR` and user
+  profile: `rembo setup` installs the plugin (listed, enabled, validates),
+  a real `claude -p` session gets the snapshot with an entry written before,
+  loads the module ("Rembo Mode On") and starts the rembo MCP server;
+  `rembo doctor` passes; `rembo uninstall` removes plugin and marketplace
+  and leaves no "rembo" in settings.json; hashes prove the real
+  `~/.claude` files were not touched. No model call (no credentials).
+- `test/plugin.test.ts`: snapshot limits and fencing, hooks as real
+  processes (answer, background sync, silence when off / not set up), MCP
+  protocol and all tools over stdio, cross-process freshness, no crash.
+- SessionStart hook: 136 ms median at 1000 entries (budget 300 ms).
+
+Found and fixed on the way: a 2 s unref-less timer kept every hook process
+alive; the background sync inherited the project folder as its working
+directory (Windows cannot delete or rename it while the sync runs).
+
+Experiments and platform findings: `docs/research/platform.md` §n.
+
+Published: github.com/zeglin/rembo (public, approved 2026-10-21) after a
+full-history scan (private tokens, hostname, OS user, IPs, secret guard).
+
+## Next: Etap 3 — hub on the test VPS (needs approval at each step)
+
+1. Read-only survey of the VPS (OS, Node/Docker, ports in use, reverse
+   proxy, firewall) — nothing changed.
+2. Plan for the maintainer: install path (`rembo-server` with Node 24 or
+   Docker), IP mode with a self-signed pinned certificate, one TCP port,
+   systemd unit, backups; no change to sshd or SSH firewall rules.
+3. After approval: install, `rembo-server key create`, then `rembo setup` on
+   this machine with the maintainer's consent to touch the real `~/.claude`.
+4. Also planned for Etap 3: `rembo-server init` (installer, ADR-0010).
 
 Open questions: none blocking.
