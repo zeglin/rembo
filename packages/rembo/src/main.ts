@@ -12,7 +12,7 @@ import { resolveProject } from '../../core/src/project.ts';
 import { PROTOCOL_MAX, PROTOCOL_MIN, PROTOCOL_VERSION, type HealthResponse } from '../../core/src/protocol.ts';
 import { liveEntries } from '../../core/src/views.ts';
 import { log, runHook } from './hook.ts';
-import { claudeConfigDir, findClaude, installedAppVersion, installPlugin, PLUGIN_ID, runClaude, uninstallPlugin } from './install.ts';
+import { checkInstalledApp, claudeConfigDir, findClaude, installedAppVersion, installPlugin, PLUGIN_ID, runClaude, uninstallPlugin } from './install.ts';
 import { McpServer } from './mcp.ts';
 import { buildSnapshot } from './snapshot.ts';
 
@@ -355,7 +355,7 @@ export async function main(argv: string[], io: Io = processIo()): Promise<number
     case 'install':
     case 'update': {
       const before = await installedAppVersion(home);
-      await open(); // must be set up first
+      (await open()).close(); // must be set up first
       const r = await install();
       const note = cmd === 'update' && before === CLIENT_VERSION ? ' (already this version; newer releases: npm i -g rembo@latest, then rembo update)' : '';
       print(`${r.ok ? '✓' : '✗'} ${r.message}${note}`, { ...r, previous: before });
@@ -487,6 +487,8 @@ async function doctor(home: string, io: Io, json: boolean, env: NodeJS.ProcessEn
       const row = (JSON.parse(listed.stdout.slice(Math.max(0, listed.stdout.indexOf('['))) || '[]') as { id: string; version?: string; enabled?: boolean }[]).find((p) => p.id === PLUGIN_ID);
       const okPlugin = Boolean(row && row.enabled !== false && row.version === CLIENT_VERSION);
       add('plugin', okPlugin, row ? `${PLUGIN_ID} ${row.version}${row.enabled === false ? ' (disabled)' : ''} in ${claudeConfigDir(env)}` : `not installed in ${claudeConfigDir(env)}`, 'Run: rembo install');
+      const broken = row ? await checkInstalledApp(home) : undefined;
+      if (broken) add('app', false, broken, 'Run: rembo install (renders the current Node.js path)');
     }
   }
   if (json) io.out(JSON.stringify({ checks }, null, 2));

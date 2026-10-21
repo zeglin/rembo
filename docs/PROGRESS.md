@@ -146,6 +146,30 @@ directory (Windows cannot delete or rename it while the sync runs).
 
 Experiments and platform findings: `docs/research/platform.md` §n.
 
+Etap 2 audit (fixed):
+- `findClaude` used relative PATH entries too: a `claude.exe` planted in
+  the current folder could have run during setup. Absolute entries only.
+- The settings.json backup (may hold secrets in `env`) is written
+  owner-only and only the last 10 are kept.
+- Plugin install builds the new copy in a staging folder and swaps it in,
+  so an interrupted install never leaves a half plugin.
+- The snapshot fence also catches `< / rembo-memory` spelled with spaces.
+- `rembo doctor` checks that the Node.js path rendered into the plugin
+  still exists (nvm/Volta upgrades would break hooks silently).
+- Literal bidi / control characters had slipped into two source files
+  (a regex class and a test string) — "Trojan Source" pattern; replaced by
+  escapes, and `test/repo-hygiene.test.ts` now fails on any such character
+  in tracked text files.
+
+Open design questions (for the maintainer):
+- `forget` is final on every machine (the hub erases the ciphertext). A
+  prompt-injected model could call it; Claude Code asks for permission per
+  tool unless the user allowed rembo tools permanently. Option: a local
+  30-day trash on each machine plus `rembo restore`.
+- In a large project the snapshot shows the newest entries first; older
+  important ones can drop out of its 3500-character project section until
+  a `summary` entry (or pinning, later) keeps them visible.
+
 Published: github.com/zeglin/rembo (public, approved 2026-10-21) after a
 full-history scan (private tokens, hostname, OS user, IPs, secret guard).
 

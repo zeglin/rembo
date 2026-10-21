@@ -30,7 +30,8 @@ export function claudeConfigDir(env: NodeJS.ProcessEnv): string {
 /** The `claude` executable on PATH, or in the native installer's default folder. */
 export function findClaude(env: NodeJS.ProcessEnv): ClaudeCli | null {
   const names = process.platform === 'win32' ? ['claude.exe', 'claude.cmd'] : ['claude'];
-  const dirs = (env.PATH ?? env.Path ?? '').split(path.delimiter).filter(Boolean);
+  // Absolute entries only: a relative one (".") would run a claude planted in the current folder.
+  const dirs = (env.PATH ?? env.Path ?? '').split(path.delimiter).filter((d) => d && path.isAbsolute(d));
   dirs.push(path.join(os.homedir(), '.local', 'bin'));
   for (const dir of dirs) {
     for (const name of names) {
@@ -107,12 +108,16 @@ async function renderPlugin(appDir: string, home: string): Promise<void> {
   await atomicWrite(manifestFile, json({ ...manifest, version: CLIENT_VERSION }));
 }
 
+/** Copies settings.json (it may hold secrets in "env") to ~/.rembo/backup, owner-only, keeping the last 10. */
 async function backupSettings(home: string, env: NodeJS.ProcessEnv): Promise<string | undefined> {
   const settings = path.join(claudeConfigDir(env), 'settings.json');
   if (!existsSync(settings)) return undefined;
-  const dir = path.join(home, 'backup', new Date().toISOString().replace(/[:.]/g, '-'));
-  await fs.mkdir(dir, { recursive: true });
-  await fs.copyFile(settings, path.join(dir, 'settings.json'));
+  const root = path.join(home, 'backup');
+  const dir = path.join(root, new Date().toISOString().replace(/[:.]/g, '-'));
+  await fs.mkdir(dir, { recursive: true, mode: 0o700 });
+  await atomicWrite(path.join(dir, 'settings.json'), await fs.readFile(settings), 0o600);
+  const all = (await fs.readdir(root)).sort();
+  for (const old of all.slice(0, Math.max(0, all.length - 10))) await fs.rm(path.join(root, old), { recursive: true, force: true });
   return dir;
 }
 
@@ -140,11 +145,15 @@ export async function installPlugin(home: string, env: NodeJS.ProcessEnv): Promi
   const src = sources();
   const appRoot = path.join(home, 'app');
   const appDir = path.join(appRoot, CLIENT_VERSION);
-  await fs.rm(appDir, { recursive: true, force: true });
-  await fs.cp(src.plugin, appDir, { recursive: true, filter: (f) => !/\.test\.tsx?$/.test(f) });
-  await fs.copyFile(src.cli, path.join(appDir, 'cli.js'));
-  if (src.license) await fs.copyFile(src.license, path.join(appDir, 'LICENSE'));
-  await renderPlugin(appDir, home);
+  // Build the copy next to the target and swap it in, so an interrupted install never leaves a half plugin.
+  const staging = `${appDir}.staging-${process.pid}`;
+  await fs.rm(staging, { recursive: true, force: true });
+  await fs.cp(src.plugin, staging, { recursive: true, filter: (f) => !/\.test\.tsx?$/.test(f) });
+  await fs.copyFile(src.cli, path.join(staging, 'cli.js'));
+  if (src.license) await fs.copyFile(src.license, path.join(staging, 'LICENSE'));
+  await renderPlugin(staging, home);
+  await fs.rm(appDir, { recursive: true, force: true, maxRetries: 5, retryDelay: 100 });
+  await fs.rename(staging, appDir);
   await atomicWrite(
     path.join(appRoot, '.claude-plugin', 'marketplace.json'),
     JSON.stringify(
@@ -178,7 +187,7 @@ export async function installPlugin(home: string, env: NodeJS.ProcessEnv): Promi
     throw new RemboError('plugin_install_failed', `The plugin did not register as expected (found: ${after ? `${after.version}, enabled ${after.enabled}` : 'nothing'}).`);
   }
   // Keep this version and the previous one (for a manual rollback); drop older copies.
-  const versions = (await fs.readdir(appRoot, { withFileTypes: true })).filter((d) => d.isDirectory() && /^\d+\.\d+\.\d+/.test(d.name));
+  const versions = (await fs.readdir(appRoot, { withFileTypes: true })).filter((d) => d.isDirectory() && /^\d+\.\d+\.\d+$/.test(d.name));
   const stamped = await Promise.all(versions.map(async (d) => ({ name: d.name, at: (await fs.stat(path.join(appRoot, d.name))).mtimeMs })));
   for (const old of stamped.sort((a, b) => b.at - a.at).slice(2)) {
     if (old.name !== CLIENT_VERSION) await fs.rm(path.join(appRoot, old.name), { recursive: true, force: true });
@@ -207,6 +216,16 @@ export async function uninstallPlugin(home: string, env: NodeJS.ProcessEnv): Pro
   }
   await fs.rm(path.join(home, 'app'), { recursive: true, force: true });
   return { ok: notes.length === 0 || !claude, message: notes.length ? `Done with notes: ${notes.join('; ')}` : 'The rembo plugin was removed from Claude Code.' };
+}
+
+/** Problems with the installed copy that would make hooks or the MCP server fail silently. */
+export async function checkInstalledApp(home: string): Promise<string | undefined> {
+  const version = await installedAppVersion(home);
+  if (!version) return 'no plugin copy in ' + path.join(home, 'app');
+  const app = await readJson<{ node?: string } | null>(path.join(home, 'app', version, 'app.json'), null);
+  if (!app?.node || !existsSync(app.node)) return `the Node.js used by the plugin is gone (${app?.node ?? '?'})`;
+  if (!existsSync(path.join(home, 'app', version, 'cli.js'))) return 'the plugin copy is incomplete';
+  return undefined;
 }
 
 /** The installed plugin version recorded in ~/.rembo/app, if any. */

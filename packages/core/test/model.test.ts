@@ -150,7 +150,7 @@ describe('forward compatibility and untrusted text', () => {
   });
 
   test('untrusted text loses escape sequences and is bounded', () => {
-    expect(untrusted('ok\u001b[2J\u001b]0;pwned\u0007 done‮')).toBe('ok [2J ]0;pwned done');
+    expect(untrusted('ok\u001b[2J\u001b]0;pwned\u0007 done\u202e')).toBe('ok [2J ]0;pwned done');
     expect(untrusted('x'.repeat(500)).length).toBe(300);
   });
 });

@@ -20,8 +20,8 @@ const CLOSE = '</rembo-memory>';
 /** Entry text (written on other devices) must not close the wrapper or carry control characters. */
 export function fence(text: string): string {
   return text
-    .replace(/[\u0000-\u0008\u000b-\u001f\u007f-\u009f‪-‮⁦-⁩]/g, '')
-    .replace(/<(\/?)rembo-memory/gi, '<$1rembo_memory');
+    .replace(/[\u0000-\u0008\u000b-\u001f\u007f-\u009f\u202a-\u202e\u2066-\u2069]/g, '')
+    .replace(/<\s*(\/?)\s*rembo-memory/gi, '<$1rembo_memory');
 }
 
 /** Cuts at a line boundary so that the result, with its note, fits in `max`. */
